@@ -42,7 +42,7 @@ uint32_t count = 0;
 
 
 hw_timer_t *setTimer = NULL;
-uint16_t setFreq = 50;
+uint16_t setFreq = 300;
 
 uint8_t preScaler = 80;
 
@@ -87,7 +87,7 @@ void LedControlTask(void *pvParameters) {
     digitalWrite(IFR_LED_PIN, false);
     digitalWrite(RED_LED_PIN, true);
 
-    vTaskDelay(5/portTICK_PERIOD_MS);
+    vTaskDelay(3/portTICK_PERIOD_MS);
 
     if(ledState){
       acOxValueIFR[count] = analogRead(AC_OX_PIN);
@@ -115,78 +115,78 @@ void LedControlTask(void *pvParameters) {
 }
 
 
-// int ind = 0;              // Índice atual do array
-// int total = 0;              // Soma total das leituras
-// int average = 0;
+int ind = 0;              // Índice atual do array
+int total = 0;              // Soma total das leituras
+int average = 0;
 
-// bool isStable(int valueNow, int Mean);
+bool isStable(int valueNow, int Mean);
 
-// unsigned long lastInterruptTime = 0;
+unsigned long lastInterruptTime = 0;
 
-// void IRAM_ATTR LED_Control(){
+void IRAM_ATTR LED_Control(){
   
-//   // Calcula o tempo decorrido desde a última interrupção
-//   // unsigned long currentMillis = millis();
-//   // unsigned long elapsedTime = currentMillis - lastInterruptTime;
+  // Calcula o tempo decorrido desde a última interrupção
+  // unsigned long currentMillis = millis();
+  // unsigned long elapsedTime = currentMillis - lastInterruptTime;
   
-//   // lastInterruptTime = currentMillis;
+  // lastInterruptTime = currentMillis;
 
-//   // // Verifica se a interrupção ocorreu no intervalo desejado
-//   // Serial.print("Tempo decorrido entre interrupções: ");
-//   // Serial.print(elapsedTime);
-//   // Serial.println(" ms");
+  // // Verifica se a interrupção ocorreu no intervalo desejado
+  // Serial.print("Tempo decorrido entre interrupções: ");
+  // Serial.print(elapsedTime);
+  // Serial.println(" ms");
 
-//   if(ledState){
-//     acOxValueReading = analogRead(AC_OX_PIN);
-//     total -= acOxValueIFR[ind];
-//     acOxValueIFR[ind] = acOxValueReading;
-//     total += acOxValueReading;
-//     ind = (ind + 1) % readings;
-//     average = total / readings;
-//   }
+  if(ledState){
+    acOxValueReading = analogRead(AC_OX_PIN);
+    total -= acOxValueIFR[ind];
+    acOxValueIFR[ind] = acOxValueReading;
+    total += acOxValueReading;
+    ind = (ind + 1) % readings;
+    average = total / readings;
+  }
 
-//   if(!ledState){
-//     acOxValueReading = analogRead(AC_OX_PIN);
-//     total -= acOxValueRED[ind];
-//     acOxValueRED[ind] = acOxValueReading;
-//     total += acOxValueReading;
-//     ind = (ind + 1) % readings;
-//     average = total / readings;
-//   }
+  if(!ledState){
+    acOxValueReading = analogRead(AC_OX_PIN);
+    total -= acOxValueRED[ind];
+    acOxValueRED[ind] = acOxValueReading;
+    total += acOxValueReading;
+    ind = (ind + 1) % readings;
+    average = total / readings;
+  }
 
-//   // if (isStable(acOxValueReading, average) and acOxValueReading < 2500 and acOxValueReading > 1800) {
+  // if (isStable(acOxValueReading, average) and acOxValueReading < 2500 and acOxValueReading > 1800) {
 
-//     if(ledState){
-//       acOxValueIFR[count] = analogRead(AC_OX_PIN);
-//       dcOxValueIFR[count] = analogRead(DC_OX_PIN);
+    if(ledState){
+      acOxValueIFR[count] = analogRead(AC_OX_PIN);
+      dcOxValueIFR[count] = analogRead(DC_OX_PIN);
 
-//       Serial.print(">SignalACIFR:");
-//       Serial.println(acOxValueIFR[count]);
+      Serial.print(">SignalACIFR:");
+      Serial.println(acOxValueIFR[count]);
 
-//       Serial.print(">SignalDCIFR:");
-//       Serial.println(dcOxValueIFR[count]);
-//     }
-//     else{
-//       acOxValueRED[count] = analogRead(AC_OX_PIN);
-//       dcOxValueRED[count] = analogRead(DC_OX_PIN);
+      Serial.print(">SignalDCIFR:");
+      Serial.println(dcOxValueIFR[count]);
+    }
+    else{
+      acOxValueRED[count] = analogRead(AC_OX_PIN);
+      dcOxValueRED[count] = analogRead(DC_OX_PIN);
 
-//       Serial.print(">SignalACRED:");
-//       Serial.println(acOxValueRED[count]);
+      Serial.print(">SignalACRED:");
+      Serial.println(acOxValueRED[count]);
 
-//       Serial.print(">SignalDCRED:");
-//       Serial.println(dcOxValueRED[count]);
-//     }
-//   // }
+      Serial.print(">SignalDCRED:");
+      Serial.println(dcOxValueRED[count]);
+    }
+  // }
   
-//   Serial.println("Média: " + String(average) + " || Valor atual: " + String(acOxValueReading) + " || Diferença: " + String(isStable(acOxValueReading, average)));
+  Serial.println("Média: " + String(average) + " || Valor atual: " + String(acOxValueReading) + " || Diferença: " + String(isStable(acOxValueReading, average)));
 
-//   // ledState = !ledState;
-//   // digitalWrite(IFR_LED_PIN, ledState);
-//   // digitalWrite(RED_LED_PIN, !ledState);
-// }
+  // ledState = !ledState;
+  // digitalWrite(IFR_LED_PIN, ledState);
+  // digitalWrite(RED_LED_PIN, !ledState);
+}
 
-// // Função para verificar se os dados estão estáveis
-// bool isStable(int valueNow, int Mean) {
-//   int threshold = 50;
-//   return abs(valueNow - Mean) < threshold;
-// }
+// Função para verificar se os dados estão estáveis
+bool isStable(int valueNow, int Mean) {
+  int threshold = 50;
+  return abs(valueNow - Mean) < threshold;
+}
