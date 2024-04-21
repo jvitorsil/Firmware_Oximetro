@@ -61,6 +61,13 @@ uint32_t allValuesDcIFR = 0;
 uint32_t allValuesAcRED = 0;
 uint32_t allValuesDcRED = 0;
 
+#define RANGE 1750
+
+uint16_t signalForAnalyzeAcRED[RANGE];
+uint16_t signalForAnalyzeDcRED[RANGE];
+
+uint16_t signalForAnalyzeAcIFR[RANGE];
+uint16_t signalForAnalyzeDcIFR[RANGE];
 
 uint32_t count = 0;
 
@@ -76,8 +83,7 @@ uint32_t timerPeriod = timerFrequency / setFreq;
 void LedControlTask(void *pvParameters);
 void IRAM_ATTR LED_Control();
 
-void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize);
-bool checkStability(int* values, int& indice);
+void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN);
 
 /* Main Application --------------------------------------------------------------------------------------------------*/
 void setup() {
@@ -100,9 +106,8 @@ void setup() {
 
 
 #define WINDOW_SIZE 100
-#define STABLE_THRESHOLD 100
-#define MIN_VARIATION 5
-#define STABLE_THRESHOLD 100
+#define MIN_VARIATION 10
+#define STABLE_THRESHOLD 70
 
 
 
@@ -119,39 +124,63 @@ void IRAM_ATTR LED_Control(){
 
   if(ledState){
 
-    MovingAverageFilter(&allValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &meanAcOxIFR, 10);
-    MovingAverageFilter(&allValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &meanDcOxIFR, 10);
+    values[indice] = analogRead(AC_OX_PIN);
+    indice = (indice + 1) % WINDOW_SIZE;
 
-    isStable = checkStability(values, indice);
+    int sum = 0;
+    for (int i = 0; i < WINDOW_SIZE; i++) 
+      sum += values[i];
+    
+    float mean = sum / (float)WINDOW_SIZE;
 
-    // Verifica se o sinal está estável
+    float sq_sum = 0;
 
-    if (isStable) {
-      Serial.print(">SignalACIFR:");
-      Serial.println(meanAcOxIFR);
+    for (int i = 0; i < WINDOW_SIZE; i++) 
+      sq_sum += pow(values[i] - mean, 2);
+    
+    float std_dev = sqrt(sq_sum / WINDOW_SIZE);
 
-      Serial.print(">SignalDCIFR:");
-      Serial.println(meanDcOxIFR);
+    Serial.print(">SignalStdIFR:");
+    Serial.println(std_dev);
 
-    } else
-      return;
-  
-  }
+    Serial.print(">Count:");
+    Serial.println(count);
+
+    if(count >= RANGE and std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD){
+        // Serial.printf("String: %d \n", signalForAnalyzeAcIFR);
+    }
+    else if (count <= RANGE and std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD) {
+      
+        MovingAverageFilter(&allValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &meanAcOxIFR, 10, AC_OX_PIN);
+        MovingAverageFilter(&allValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &meanDcOxIFR, 10, DC_OX_PIN);
+
+        signalForAnalyzeAcIFR[count] = meanAcOxIFR;
+        signalForAnalyzeDcIFR[count] = meanDcOxIFR;
+
+        Serial.print("> SignalACIFR:");
+        Serial.println(signalForAnalyzeAcIFR[count]);
+
+        count++;
+
+      if (!isStable) 
+        isStable = true;
+      
+    } else{
+      isStable = false;
+      count = 0;
+    }
+}
+
+
   else{
-    MovingAverageFilter(&allValuesAcRED, arrayAcOxRED, &windowAcRED, &meanAcOxRED, 10);
-    MovingAverageFilter(&allValuesDcRED, arrayDcOxRED, &windowDcRED, &meanDcOxRED, 10);
+    // MovingAverageFilter(&allValuesAcRED, arrayAcOxRED, &windowAcRED, &meanAcOxRED, 10);
+    // MovingAverageFilter(&allValuesDcRED, arrayDcOxRED, &windowDcRED, &meanDcOxRED, 10);
 
-    // isStable = checkStability(values, indice);
+    // Serial.print(">SignalACRED:");
+    // Serial.println(meanAcOxRED);
 
-    // if (isStable) {
-    //   Serial.print(">SignalACRED:");
-    //   Serial.println(meanAcOxRED);
-
-    //   Serial.print(">SignalDCRED:");
-    //   Serial.println(meanDcOxRED);
-
-    // } else
-    //   return;
+    // Serial.print(">SignalDCRED:");
+    // Serial.println(meanDcOxRED);
   }
 
   ledState = !ledState;
@@ -159,48 +188,14 @@ void IRAM_ATTR LED_Control(){
   digitalWrite(RED_LED_PIN, !ledState);
 }
   
-void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize){
+void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN){
   
-    uint16_t OxValueReading = analogRead(AC_OX_PIN);
+    uint16_t OxValueReading = analogRead(PIN);
 
     *allValues -= arrayValues[*window];
     *allValues += OxValueReading;
     arrayValues[*window] = OxValueReading;
     *window = (*window + 1) % windowSize;
     *meanValue = *allValues / windowSize;
-}
-
-
-bool checkStability(int* values, int& indice) {
-  // Lê o valor do ADC e atualiza o índice
-  values[indice] = analogRead(AC_OX_PIN);
-  indice = (indice + 1) % WINDOW_SIZE;
-
-  // Calcula a média
-  int sum = 0;
-
-  for (int i = 0; i < WINDOW_SIZE; i++)
-    sum += values[i];
-  
-  float mean = sum / (float)WINDOW_SIZE;
-
-  float sq_sum = 0;
-
-  for (int i = 0; i < WINDOW_SIZE; i++)
-    sq_sum += pow(values[i] - mean, 2);
-  
-  float std_dev = sqrt(sq_sum / WINDOW_SIZE);
-
-  Serial.print(">SignalMeanIFR:");
-  Serial.println(mean);
-
-  Serial.print(">SignalStdIFR:");
-  Serial.println(std_dev);
-
-  if (std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD)
-    return true;
-
- else
-    return false;
 
 }
