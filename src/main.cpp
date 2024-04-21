@@ -10,8 +10,17 @@
 
 /* Includes ----------------------------------------------------------------------------------------------------------*/
 #include <Arduino.h>
+// #include <Filters.h>
+// #include <AH/Timing/MillisMicrosTimer.hpp>
+// #include <Filters/Butterworth.hpp>
 
 /* Constants ---------------------------------------------------------------------------------------------------------*/
+#define winSize 10
+
+// #define ORDER 2
+// #define CUTOFF_FREQUENCY 10.0
+// #define SAMPLING_FREQUENCY 300.0
+// #define NORMALIZEDFREQ 2 * CUTOFF_FREQUENCY / SAMPLING_FREQUENCY
 
 /* Pin numbers -------------------------------------------------------------------------------------------------------*/
 #define AC_OX_PIN GPIO_NUM_0
@@ -20,29 +29,43 @@
 #define RED_LED_PIN GPIO_NUM_3
 #define IFR_LED_PIN GPIO_NUM_4
 
+/* Instances -------------------------------------------------------------------------------------------------------*/
+// auto filter = butter<6>(NORMALIZEDFREQ);
 
 /* Private variables -------------------------------------------------------------------------------------------------*/
 bool ledState = true;
 
-const uint16_t readings = 1000;
+uint8_t windowAcRED = 0;
+uint8_t windowDcRED = 0;
 
-uint16_t acOxValueRED[readings];
-uint16_t acOxValueIFR[readings];
+uint8_t windowAcIFR = 0;
+uint8_t windowDcIFR = 0;
 
-uint16_t dcOxValueRED[readings];
-uint16_t dcOxValueIFR[readings];
+uint32_t arrayAcOxRED[winSize];
+uint32_t arrayDcOxRED[winSize];
 
-uint16_t acOxValueReadingRED = 0;
-uint16_t acOxValueReadingIFR = 0;
-uint16_t dcOxValueReadingIFR = 0;
-uint16_t dcOxValueReadingRED = 0;
+uint32_t arrayAcOxIFR[winSize];
+uint32_t arrayDcOxIFR[winSize];
+
+uint16_t meanAcOxIFR = 0;
+uint16_t meanDcOxIFR = 0;
+
+uint16_t meanAcOxRED = 0;
+uint16_t meanDcOxRED = 0;
+
 uint16_t acOxValueReading = 0;
+uint16_t dcOxValueReading = 0;
+
+uint32_t allValuesAcIFR = 0;
+uint32_t allValuesDcIFR = 0;
+uint32_t allValuesAcRED = 0;
+uint32_t allValuesDcRED = 0;
+
+
 uint32_t count = 0;
 
-
-
 hw_timer_t *setTimer = NULL;
-uint16_t setFreq = 50;
+uint16_t setFreq = 350;
 
 uint8_t preScaler = 80;
 
@@ -52,6 +75,9 @@ uint32_t timerPeriod = timerFrequency / setFreq;
 /* Private functions -------------------------------------------------------------------------------------------------*/
 void LedControlTask(void *pvParameters);
 void IRAM_ATTR LED_Control();
+
+void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize);
+bool checkStability(int* values, int& indice);
 
 /* Main Application --------------------------------------------------------------------------------------------------*/
 void setup() {
@@ -70,100 +96,111 @@ void setup() {
   timerAlarmWrite(setTimer, timerPeriod, true);
   timerAlarmEnable(setTimer);
 
-  for (int i = 0; i < readings; i++) {
-    acOxValueRED[i] = 0;
-  }
-
-  xTaskCreate(LedControlTask, "LEDs Control Task", 4096, NULL, 1, NULL);
-
 }
+
+
+#define WINDOW_SIZE 100
+#define STABLE_THRESHOLD 100
+#define MIN_VARIATION 5
+#define STABLE_THRESHOLD 100
+
+
+
+int values[WINDOW_SIZE];
+int indice = 0;
+bool isStable = false;
+
 
 void loop() { }
-
-void LedControlTask(void *pvParameters) {
-  while(1) {
-    ledState = !ledState;
-
-    digitalWrite(IFR_LED_PIN, false);
-    digitalWrite(RED_LED_PIN, true);
-    vTaskDelay(10000/portTICK_PERIOD_MS);
-
-  }
-}
-
-
-int ind = 0;              // Índice atual do array
-int total = 0;              // Soma total das leituras
-int average = 0;
-
-bool isStable(int valueNow, int Mean);
 
 unsigned long lastInterruptTime = 0;
 
 void IRAM_ATTR LED_Control(){
-  
-  // Calcula o tempo decorrido desde a última interrupção
-  // unsigned long currentMillis = millis();
-  // unsigned long elapsedTime = currentMillis - lastInterruptTime;
-  
-  // lastInterruptTime = currentMillis;
-
-  // // Verifica se a interrupção ocorreu no intervalo desejado
-  // Serial.print("Tempo decorrido entre interrupções: ");
-  // Serial.print(elapsedTime);
-  // Serial.println(" ms");
 
   if(ledState){
-    acOxValueReading = analogRead(AC_OX_PIN);
-    total -= acOxValueIFR[ind];
-    acOxValueIFR[ind] = acOxValueReading;
-    total += acOxValueReading;
-    ind = (ind + 1) % readings;
-    average = total / readings;
-  }
 
-  if(!ledState){
-    acOxValueReading = analogRead(AC_OX_PIN);
-    total -= acOxValueRED[ind];
-    acOxValueRED[ind] = acOxValueReading;
-    total += acOxValueReading;
-    ind = (ind + 1) % readings;
-    average = total / readings;
-  }
+    MovingAverageFilter(&allValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &meanAcOxIFR, 10);
+    MovingAverageFilter(&allValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &meanDcOxIFR, 10);
 
-  if (isStable(acOxValueReading, average) and acOxValueReading < 2500 and acOxValueReading > 1800) {
+    isStable = checkStability(values, indice);
 
-    if(ledState){
-      acOxValueIFR[count] = analogRead(AC_OX_PIN);
-      dcOxValueIFR[count] = analogRead(DC_OX_PIN);
+    // Verifica se o sinal está estável
 
+    if (isStable) {
       Serial.print(">SignalACIFR:");
-      Serial.println(acOxValueIFR[count]);
+      Serial.println(meanAcOxIFR);
 
       Serial.print(">SignalDCIFR:");
-      Serial.println(dcOxValueIFR[count]);
-    }
-    else{
-      acOxValueRED[count] = analogRead(AC_OX_PIN);
-      dcOxValueRED[count] = analogRead(DC_OX_PIN);
+      Serial.println(meanDcOxIFR);
 
-      Serial.print(">SignalACRED:");
-      Serial.println(acOxValueRED[count]);
-
-      Serial.print(">SignalDCRED:");
-      Serial.println(dcOxValueRED[count]);
-    }
-  }
+    } else
+      return;
   
-  Serial.println("Média: " + String(average) + " || Valor atual: " + String(acOxValueReading) + " || Diferença: " + String(isStable(acOxValueReading, average)));
+  }
+  else{
+    MovingAverageFilter(&allValuesAcRED, arrayAcOxRED, &windowAcRED, &meanAcOxRED, 10);
+    MovingAverageFilter(&allValuesDcRED, arrayDcOxRED, &windowDcRED, &meanDcOxRED, 10);
 
-  // ledState = !ledState;
-  // digitalWrite(IFR_LED_PIN, ledState);
-  // digitalWrite(RED_LED_PIN, !ledState);
+    // isStable = checkStability(values, indice);
+
+    // if (isStable) {
+    //   Serial.print(">SignalACRED:");
+    //   Serial.println(meanAcOxRED);
+
+    //   Serial.print(">SignalDCRED:");
+    //   Serial.println(meanDcOxRED);
+
+    // } else
+    //   return;
+  }
+
+  ledState = !ledState;
+  digitalWrite(IFR_LED_PIN, ledState);
+  digitalWrite(RED_LED_PIN, !ledState);
+}
+  
+void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize){
+  
+    uint16_t OxValueReading = analogRead(AC_OX_PIN);
+
+    *allValues -= arrayValues[*window];
+    *allValues += OxValueReading;
+    arrayValues[*window] = OxValueReading;
+    *window = (*window + 1) % windowSize;
+    *meanValue = *allValues / windowSize;
 }
 
-// Função para verificar se os dados estão estáveis
-bool isStable(int valueNow, int Mean) {
-  int threshold = 50;
-  return abs(valueNow - Mean) < threshold;
+
+bool checkStability(int* values, int& indice) {
+  // Lê o valor do ADC e atualiza o índice
+  values[indice] = analogRead(AC_OX_PIN);
+  indice = (indice + 1) % WINDOW_SIZE;
+
+  // Calcula a média
+  int sum = 0;
+
+  for (int i = 0; i < WINDOW_SIZE; i++)
+    sum += values[i];
+  
+  float mean = sum / (float)WINDOW_SIZE;
+
+  float sq_sum = 0;
+
+  for (int i = 0; i < WINDOW_SIZE; i++)
+    sq_sum += pow(values[i] - mean, 2);
+  
+  float std_dev = sqrt(sq_sum / WINDOW_SIZE);
+
+  Serial.print(">SignalMeanIFR:");
+  Serial.println(mean);
+
+  Serial.print(">SignalStdIFR:");
+  Serial.println(std_dev);
+
+  if (std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD)
+    return true;
+
+ else
+    return false;
+
 }
