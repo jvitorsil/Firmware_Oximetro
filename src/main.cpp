@@ -10,17 +10,10 @@
 
 /* Includes ----------------------------------------------------------------------------------------------------------*/
 #include <Arduino.h>
-// #include <Filters.h>
-// #include <AH/Timing/MillisMicrosTimer.hpp>
-// #include <Filters/Butterworth.hpp>
+
 
 /* Constants ---------------------------------------------------------------------------------------------------------*/
 #define winSize 10
-
-// #define ORDER 2
-// #define CUTOFF_FREQUENCY 10.0
-// #define SAMPLING_FREQUENCY 300.0
-// #define NORMALIZEDFREQ 2 * CUTOFF_FREQUENCY / SAMPLING_FREQUENCY
 
 /* Pin numbers -------------------------------------------------------------------------------------------------------*/
 #define AC_OX_PIN GPIO_NUM_0
@@ -29,11 +22,33 @@
 #define RED_LED_PIN GPIO_NUM_3
 #define IFR_LED_PIN GPIO_NUM_4
 
+#define WINDOW_SIZE 100
+#define MIN_VARIATION 10
+#define STABLE_THRESHOLD 70
+
+#define RANGE 800
+#define WINDOW_SIZE_PEAK 50
+
+
+
+#define NUM_SAMPLES 1750
+#define SAMPLE_RATE 170 // Hz
+#define CUTOFF_FREQUENCY 2 // Hz
+#define NUM_TAPS 51
+
+
+float data[NUM_SAMPLES];
+volatile uint16_t filtered_data[NUM_SAMPLES];
+
+float filter_taps[NUM_TAPS];
+
 /* Instances -------------------------------------------------------------------------------------------------------*/
-// auto filter = butter<6>(NORMALIZEDFREQ);
+
+
 
 /* Private variables -------------------------------------------------------------------------------------------------*/
 bool ledState = true;
+bool processData = false;
 
 uint8_t windowAcRED = 0;
 uint8_t windowDcRED = 0;
@@ -61,18 +76,29 @@ uint32_t allValuesDcIFR = 0;
 uint32_t allValuesAcRED = 0;
 uint32_t allValuesDcRED = 0;
 
-#define RANGE 1750
 
-uint16_t signalForAnalyzeAcRED[RANGE];
-uint16_t signalForAnalyzeDcRED[RANGE];
+//166 Hz - 6ms
+//1,66 Hz - 600ms
 
-uint16_t signalForAnalyzeAcIFR[RANGE];
-uint16_t signalForAnalyzeDcIFR[RANGE];
+volatile uint16_t signalForAnalyzeAcRED[RANGE];
+volatile uint16_t signalForAnalyzeDcRED[RANGE];
+
+volatile uint16_t signalForAnalyzeAcIFR[RANGE];
+volatile uint16_t signalForAnalyzeDcIFR[RANGE];
+
+
+uint16_t peakCount = 0;
+uint16_t valleyCount = 0;
+
+uint16_t peaks[RANGE];
+uint16_t valleys[RANGE];
+
 
 uint32_t count = 0;
 
+
 hw_timer_t *setTimer = NULL;
-uint16_t setFreq = 350;
+uint16_t setFreq = 200;
 
 uint8_t preScaler = 80;
 
@@ -84,6 +110,10 @@ void LedControlTask(void *pvParameters);
 void IRAM_ATTR LED_Control();
 
 void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN);
+void detectPeaksAndValleys(volatile uint16_t arrayAcOx[]);
+
+void generateHighPassFilter();
+void applyFilter(volatile uint16_t arrayAcOx[]);
 
 /* Main Application --------------------------------------------------------------------------------------------------*/
 void setup() {
@@ -102,14 +132,10 @@ void setup() {
   timerAlarmWrite(setTimer, timerPeriod, true);
   timerAlarmEnable(setTimer);
 
+
+  xTaskCreate(LedControlTask, "LEDs Control Task", 4096, NULL, 1, NULL);
+
 }
-
-
-#define WINDOW_SIZE 100
-#define MIN_VARIATION 10
-#define STABLE_THRESHOLD 70
-
-
 
 int values[WINDOW_SIZE];
 int indice = 0;
@@ -118,7 +144,24 @@ bool isStable = false;
 
 void loop() { }
 
-unsigned long lastInterruptTime = 0;
+void LedControlTask(void *pvParameters) {
+    while(1) {
+        if(processData){
+            timerAlarmDisable(setTimer);    
+            for(uint16_t count = 0; count < RANGE; count++){
+              Serial.print("> SignalACIFR:");
+              Serial.println(signalForAnalyzeAcIFR[count]);
+              vTaskDelay(1 / portTICK_PERIOD_MS);
+            }
+
+            // generateHighPassFilter();
+            // applyFilter(signalForAnalyzeAcIFR);
+
+            processData = false;
+        }
+      vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+}
 
 void IRAM_ATTR LED_Control(){
 
@@ -140,24 +183,25 @@ void IRAM_ATTR LED_Control(){
     
     float std_dev = sqrt(sq_sum / WINDOW_SIZE);
 
-    Serial.print(">SignalStdIFR:");
-    Serial.println(std_dev);
+    // Serial.print(">SignalStdIFR:");
+    // Serial.println(std_dev);
 
     Serial.print(">Count:");
     Serial.println(count);
 
     if(count >= RANGE and std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD){
-        // Serial.printf("String: %d \n", signalForAnalyzeAcIFR);
+      processData = true;
     }
     else if (count <= RANGE and std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD) {
-      
-        MovingAverageFilter(&allValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &meanAcOxIFR, 10, AC_OX_PIN);
-        MovingAverageFilter(&allValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &meanDcOxIFR, 10, DC_OX_PIN);
+        processData = false;
+
+        MovingAverageFilter(&allValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &meanAcOxIFR, winSize, AC_OX_PIN);
+        MovingAverageFilter(&allValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &meanDcOxIFR, winSize, DC_OX_PIN);
 
         signalForAnalyzeAcIFR[count] = meanAcOxIFR;
         signalForAnalyzeDcIFR[count] = meanDcOxIFR;
 
-        Serial.print("> SignalACIFR:");
+        Serial.print("> SignalACIFRBRUTO:");
         Serial.println(signalForAnalyzeAcIFR[count]);
 
         count++;
@@ -166,6 +210,7 @@ void IRAM_ATTR LED_Control(){
         isStable = true;
       
     } else{
+      processData = false;
       isStable = false;
       count = 0;
     }
@@ -198,4 +243,83 @@ void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *wi
     *window = (*window + 1) % windowSize;
     *meanValue = *allValues / windowSize;
 
+    
+
 }
+
+// void detectPeaksAndValleys(volatile uint16_t arrayAcOx[]) {
+    
+//   uint16_t PeakSum = 0;
+//   uint16_t ValleySum = 0;
+
+//   for (uint16_t i = 750; i < RANGE - WINDOW_SIZE_PEAK; i++) {
+
+//     uint16_t maxVal = arrayAcOx[i];
+//     uint16_t minVal = arrayAcOx[i];
+
+//     int maxPos = i;
+//     int minPos = i;
+
+
+//     for (int j = i; j < i + WINDOW_SIZE_PEAK; j++) {
+//       if (arrayAcOx[j] > maxVal) {
+//         maxVal = arrayAcOx[j];
+//         maxPos = j;
+//       }
+//       if (arrayAcOx[j] < minVal) {
+//         minVal = arrayAcOx[j];
+//         minPos = j;
+//       }
+//     }
+
+//     if (maxPos == i) {
+//       peaks[peakCount] = maxVal;
+//       PeakSum += maxVal;
+//       peakCount++;
+//     }
+//     if (minPos == i) {
+//       valleys[valleyCount] = minVal;
+//       ValleySum += minVal;
+//       valleyCount++;
+//     }
+//   }
+//   Serial.printf("Peaks: %d || Valley: %d || valleyCount: %d || peakCount: %d \n", PeakSum, ValleySum, valleyCount, peakCount);
+// }
+
+
+// void generateHighPassFilter() {
+//   int middle = NUM_TAPS / 2;
+//   for (uint16_t i = 0; i < NUM_TAPS; i++) {
+//     if (i == middle) {
+//       filter_taps[i] = 1 - 2 * CUTOFF_FREQUENCY / SAMPLE_RATE;
+//     } else {
+//       filter_taps[i] = -sin(2 * PI * CUTOFF_FREQUENCY * (i - middle) / SAMPLE_RATE) / (PI * (i - middle));
+//     }
+//   }
+// }
+
+// void applyFilter(volatile uint16_t arrayAcOx[]) {
+
+//   uint16_t start_index = NUM_TAPS / 2;
+//   uint16_t end_index = NUM_SAMPLES - NUM_TAPS / 2;
+
+//   for (uint16_t i = start_index; i < end_index; i++) {
+//     volatile uint16_t filtered_value = 0;
+//     for (uint16_t j = 0; j < NUM_TAPS; j++) {
+//       filtered_value += arrayAcOx[i + j] * filter_taps[j];
+//     }
+//     filtered_data[i] = filtered_value;
+//   }
+
+//   for(uint16_t i = 0; i < RANGE; i++){
+//     Serial.print(">FilteredSignalACIFRTODO:");
+//     Serial.println(filtered_data[i]);
+//   }
+
+//   for(uint16_t i = 200; i < 600; i++){
+//     Serial.print(">FilteredSignalACIFRCORTADO:");
+//     Serial.println(filtered_data[i]);
+//   }
+
+//   detectPeaksAndValleys(filtered_data);
+// }
