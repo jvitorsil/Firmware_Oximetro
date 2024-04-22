@@ -10,10 +10,8 @@
 
 /* Includes ----------------------------------------------------------------------------------------------------------*/
 #include <Arduino.h>
-
-
-/* Constants ---------------------------------------------------------------------------------------------------------*/
-#define winSize 10
+#include <WiFi.h>
+#include <HTTPClient.h>
 
 /* Pin numbers -------------------------------------------------------------------------------------------------------*/
 #define AC_OX_PIN GPIO_NUM_0
@@ -22,98 +20,106 @@
 #define RED_LED_PIN GPIO_NUM_3
 #define IFR_LED_PIN GPIO_NUM_4
 
-#define WINDOW_SIZE 100
-#define MIN_VARIATION 10
-#define STABLE_THRESHOLD 70
-
-#define RANGE 800
-#define WINDOW_SIZE_PEAK 50
-
-
-
-#define NUM_SAMPLES 1750
-#define SAMPLE_RATE 170 // Hz
-#define CUTOFF_FREQUENCY 2 // Hz
-#define NUM_TAPS 51
-
-
-float data[NUM_SAMPLES];
-volatile uint16_t filtered_data[NUM_SAMPLES];
-
-float filter_taps[NUM_TAPS];
 
 /* Instances -------------------------------------------------------------------------------------------------------*/
+HTTPClient http;
 
+/* Constants ---------------------------------------------------------------------------------------------------------*/
+#define WINDOW_AVERAGE 10
+
+
+#define WINDOW_STABILIZE 100
+#define MIN_STD_VAR 1900
+#define MAX_STD_VAR 2100
+
+
+#define SIGNAL_SIZE 800
+#define WINDOW_SIZE_MOVE 50
+
+
+#define FILT_SAMPLE_RATE 170 // Hz
+#define FILT_CUTOFF_FREQUENCY 2 // Hz
+#define FILT_NUM_TAPS 51
+
+
+#define INT_SET_FREQ 200
+#define INT_PRE_SCALER 80
+#define INT_TIM_FREQ  80000000/INT_PRE_SCALER
+#define INT_TIM_PERI  INT_TIM_FREQ/INT_SET_FREQ
+
+
+#define SSID "Solano"
+#define PASSWORD "solano1234"
+#define SERVER_URL "http://172.20.10.7:5000/"
 
 
 /* Private variables -------------------------------------------------------------------------------------------------*/
-bool ledState = true;
-bool processData = false;
+bool flagLedState = true;
+bool flagReadData = false;
+bool flagStable = false;
 
-uint8_t windowAcRED = 0;
-uint8_t windowDcRED = 0;
 
-uint8_t windowAcIFR = 0;
-uint8_t windowDcIFR = 0;
+int values[WINDOW_STABILIZE];
+int indice = 0;
 
-uint32_t arrayAcOxRED[winSize];
-uint32_t arrayDcOxRED[winSize];
 
-uint32_t arrayAcOxIFR[winSize];
-uint32_t arrayDcOxIFR[winSize];
+uint8_t windowAc = 0;
+uint8_t windowDc = 0;
 
-uint16_t meanAcOxIFR = 0;
-uint16_t meanDcOxIFR = 0;
+uint16_t arrayAcOxRED[WINDOW_AVERAGE];
+uint16_t arrayDcOxRED[WINDOW_AVERAGE];
 
-uint16_t meanAcOxRED = 0;
-uint16_t meanDcOxRED = 0;
+uint16_t arrayAcOxIFR[WINDOW_AVERAGE];
+uint16_t arrayDcOxIFR[WINDOW_AVERAGE];
 
 uint16_t acOxValueReading = 0;
 uint16_t dcOxValueReading = 0;
 
-uint32_t allValuesAcIFR = 0;
-uint32_t allValuesDcIFR = 0;
-uint32_t allValuesAcRED = 0;
-uint32_t allValuesDcRED = 0;
+uint16_t sumValuesAcIFR = 0;
+uint16_t sumValuesDcIFR = 0;
+uint16_t sumValuesAcRED = 0;
+uint16_t sumValuesDcRED = 0;
 
+uint16_t signalForAnalyzeAcRED[SIGNAL_SIZE];
+uint16_t signalForAnalyzeDcRED[SIGNAL_SIZE];
 
-//166 Hz - 6ms
-//1,66 Hz - 600ms
-
-volatile uint16_t signalForAnalyzeAcRED[RANGE];
-volatile uint16_t signalForAnalyzeDcRED[RANGE];
-
-volatile uint16_t signalForAnalyzeAcIFR[RANGE];
-volatile uint16_t signalForAnalyzeDcIFR[RANGE];
+uint16_t signalForAnalyzeAcIFR[SIGNAL_SIZE];
+uint16_t signalForAnalyzeDcIFR[SIGNAL_SIZE];
 
 
 uint16_t peakCount = 0;
 uint16_t valleyCount = 0;
 
-uint16_t peaks[RANGE];
-uint16_t valleys[RANGE];
+uint16_t peaks[SIGNAL_SIZE];
+uint16_t valleys[SIGNAL_SIZE];
 
 
-uint32_t count = 0;
+float data[SIGNAL_SIZE];
+volatile uint16_t filtered_data[SIGNAL_SIZE];
+
+float filter_taps[FILT_NUM_TAPS];
+
+uint16_t count = 0;
 
 
+// Definição da Interrupção
 hw_timer_t *setTimer = NULL;
-uint16_t setFreq = 200;
 
-uint8_t preScaler = 80;
 
-uint32_t timerFrequency = 80000000 / preScaler;
-uint32_t timerPeriod = timerFrequency / setFreq;
 
 /* Private functions -------------------------------------------------------------------------------------------------*/
 void LedControlTask(void *pvParameters);
 void IRAM_ATTR LED_Control();
 
-void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN);
+void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN);
 void detectPeaksAndValleys(volatile uint16_t arrayAcOx[]);
 
 void generateHighPassFilter();
 void applyFilter(volatile uint16_t arrayAcOx[]);
+
+void sendMeasurement(uint16_t bpmValue);
+void connectToWiFi();
+
 
 /* Main Application --------------------------------------------------------------------------------------------------*/
 void setup() {
@@ -127,37 +133,45 @@ void setup() {
 
   analogReadResolution(12);
 
-  setTimer = timerBegin(0, preScaler, true);
-  timerAttachInterrupt(setTimer, &LED_Control, true);
-  timerAlarmWrite(setTimer, timerPeriod, true);
-  timerAlarmEnable(setTimer);
+  // WiFi.begin(SSID, PASSWORD);
+  
+  // if (WiFi.status() != WL_CONNECTED)
+  //   delay(1000);
+  
 
+  setTimer = timerBegin(0, INT_PRE_SCALER, true);
+  timerAttachInterrupt(setTimer, &LED_Control, true);
+  timerAlarmWrite(setTimer, INT_TIM_PERI, true);
+  timerAlarmEnable(setTimer);
 
   xTaskCreate(LedControlTask, "LEDs Control Task", 4096, NULL, 1, NULL);
 
 }
 
-int values[WINDOW_SIZE];
-int indice = 0;
-bool isStable = false;
-
-
 void loop() { }
 
 void LedControlTask(void *pvParameters) {
     while(1) {
-        if(processData){
+        if(flagReadData){
             timerAlarmDisable(setTimer);    
-            for(uint16_t count = 0; count < RANGE; count++){
-              Serial.print("> SignalACIFR:");
-              Serial.println(signalForAnalyzeAcIFR[count]);
-              vTaskDelay(1 / portTICK_PERIOD_MS);
+            for(uint16_t count = 0; count < SIGNAL_SIZE; count++){
+
+              // if (WiFi.status() != WL_CONNECTED)
+              //   connectToWiFi();
+              //  else
+              //   sendMeasurement(signalForAnalyzeAcIFR[count]);
+              
+                Serial.print("> SignalACIFR:");
+                Serial.println(signalForAnalyzeAcIFR[count]);
+
+                vTaskDelay(1/portTICK_PERIOD_MS);
             }
 
             // generateHighPassFilter();
             // applyFilter(signalForAnalyzeAcIFR);
 
-            processData = false;
+            flagReadData = false;
+            timerAlarmEnable(setTimer);
         }
       vTaskDelay(1 / portTICK_PERIOD_MS);
     }
@@ -165,61 +179,61 @@ void LedControlTask(void *pvParameters) {
 
 void IRAM_ATTR LED_Control(){
 
-  if(ledState){
+  if(flagLedState){
 
     values[indice] = analogRead(AC_OX_PIN);
-    indice = (indice + 1) % WINDOW_SIZE;
+    indice = (indice + 1) % WINDOW_STABILIZE;
 
-    int sum = 0;
-    for (int i = 0; i < WINDOW_SIZE; i++) 
+    uint16_t sum = 0;
+
+    for (int i = 0; i < WINDOW_STABILIZE; i++) 
       sum += values[i];
     
-    float mean = sum / (float)WINDOW_SIZE;
+    float mean = sum / (float)WINDOW_STABILIZE;
 
     float sq_sum = 0;
 
-    for (int i = 0; i < WINDOW_SIZE; i++) 
+    for (int i = 0; i < WINDOW_STABILIZE; i++) 
       sq_sum += pow(values[i] - mean, 2);
     
-    float std_dev = sqrt(sq_sum / WINDOW_SIZE);
+    float std_dev = sqrt(sq_sum / WINDOW_STABILIZE);
 
-    // Serial.print(">SignalStdIFR:");
-    // Serial.println(std_dev);
+    Serial.print(">SignalStdIFR:");
+    Serial.println(std_dev);
 
     Serial.print(">Count:");
     Serial.println(count);
 
-    if(count >= RANGE and std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD){
-      processData = true;
+    Serial.print("> SignalACIFRBRUTO:");
+    Serial.println(values[indice]);
+
+    if(count >= SIGNAL_SIZE and std_dev > MIN_STD_VAR and std_dev < MAX_STD_VAR){
+      flagReadData = true;
+      count = 0;
     }
-    else if (count <= RANGE and std_dev > MIN_VARIATION and std_dev < STABLE_THRESHOLD) {
-        processData = false;
+    else if (count <= SIGNAL_SIZE and std_dev > MIN_STD_VAR and std_dev < MAX_STD_VAR) {
+        flagReadData = false;
 
-        MovingAverageFilter(&allValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &meanAcOxIFR, winSize, AC_OX_PIN);
-        MovingAverageFilter(&allValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &meanDcOxIFR, winSize, DC_OX_PIN);
+        MovingAverageFilter(&sumValuesAcIFR, arrayAcOxIFR, &windowAc, &signalForAnalyzeAcIFR[count], WINDOW_AVERAGE, AC_OX_PIN);
+        MovingAverageFilter(&sumValuesDcIFR, arrayDcOxIFR, &windowDc, &signalForAnalyzeDcIFR[count], WINDOW_AVERAGE, DC_OX_PIN);
 
-        signalForAnalyzeAcIFR[count] = meanAcOxIFR;
-        signalForAnalyzeDcIFR[count] = meanDcOxIFR;
-
-        Serial.print("> SignalACIFRBRUTO:");
+        Serial.print("> SignalACIFFiltradoMV:");
         Serial.println(signalForAnalyzeAcIFR[count]);
 
         count++;
 
-      if (!isStable) 
-        isStable = true;
+      if (!flagStable) 
+        flagStable = true;
       
     } else{
-      processData = false;
-      isStable = false;
+      flagReadData = false;
+      flagStable = false;
       count = 0;
     }
 }
-
-
   else{
-    // MovingAverageFilter(&allValuesAcRED, arrayAcOxRED, &windowAcRED, &meanAcOxRED, 10);
-    // MovingAverageFilter(&allValuesDcRED, arrayDcOxRED, &windowDcRED, &meanDcOxRED, 10);
+    // MovingAverageFilter(&sumValuesAcRED, arrayAcOxRED, &windowAc, &meanAcOxRED, 10);
+    // MovingAverageFilter(&sumValuesDcRED, arrayDcOxRED, &windowDc, &meanDcOxRED, 10);
 
     // Serial.print(">SignalACRED:");
     // Serial.println(meanAcOxRED);
@@ -228,31 +242,72 @@ void IRAM_ATTR LED_Control(){
     // Serial.println(meanDcOxRED);
   }
 
-  ledState = !ledState;
-  digitalWrite(IFR_LED_PIN, ledState);
-  digitalWrite(RED_LED_PIN, !ledState);
+  flagLedState = !flagLedState;
+  digitalWrite(IFR_LED_PIN, flagLedState);
+  digitalWrite(RED_LED_PIN, !flagLedState);
 }
   
-void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN){
+void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN){
   
-    uint16_t OxValueReading = analogRead(PIN);
+  uint16_t OxValueReading = analogRead(PIN);
 
-    *allValues -= arrayValues[*window];
-    *allValues += OxValueReading;
-    arrayValues[*window] = OxValueReading;
-    *window = (*window + 1) % windowSize;
-    *meanValue = *allValues / windowSize;
-
-    
-
+  *sumValues -= arrayValues[*window];
+  *sumValues += OxValueReading;
+  arrayValues[*window] = OxValueReading;
+  *window = (*window + 1) % windowSize;
+  *meanValue = *sumValues / windowSize;
 }
+
+
+void sendMeasurement(uint16_t bpmValue) {
+
+  String requestBody = "{\"dado\":\"" + String(bpmValue) + "\"}";
+  String url = String(SERVER_URL) + "/dados";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  int httpResponseCode = http.POST(requestBody);
+
+
+  if (httpResponseCode > 0) {
+    Serial.print("Resposta do servidor: ");
+    Serial.println(http.getString());
+  } else {
+    Serial.print("Erro na requisição HTTP: ");
+    Serial.println(httpResponseCode);
+  }
+
+  http.end();
+}
+
+
+void connectToWiFi() {
+
+  Serial.println("Conectando ao WiFi...");
+  WiFi.begin(SSID, PASSWORD);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 5) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConectado ao WiFi");
+  } else {
+    Serial.println("\nFalha ao conectar ao WiFi");
+  }
+}
+
 
 // void detectPeaksAndValleys(volatile uint16_t arrayAcOx[]) {
     
 //   uint16_t PeakSum = 0;
 //   uint16_t ValleySum = 0;
 
-//   for (uint16_t i = 750; i < RANGE - WINDOW_SIZE_PEAK; i++) {
+//   for (uint16_t i = 750; i < SIGNAL_SIZE - WINDOW_SIZE_MOVE; i++) {
 
 //     uint16_t maxVal = arrayAcOx[i];
 //     uint16_t minVal = arrayAcOx[i];
@@ -261,7 +316,7 @@ void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *wi
 //     int minPos = i;
 
 
-//     for (int j = i; j < i + WINDOW_SIZE_PEAK; j++) {
+//     for (int j = i; j < i + WINDOW_SIZE_MOVE; j++) {
 //       if (arrayAcOx[j] > maxVal) {
 //         maxVal = arrayAcOx[j];
 //         maxPos = j;
@@ -288,30 +343,30 @@ void MovingAverageFilter(uint32_t *allValues, uint32_t *arrayValues, uint8_t *wi
 
 
 // void generateHighPassFilter() {
-//   int middle = NUM_TAPS / 2;
-//   for (uint16_t i = 0; i < NUM_TAPS; i++) {
+//   int middle = FILT_NUM_TAPS / 2;
+//   for (uint16_t i = 0; i < FILT_NUM_TAPS; i++) {
 //     if (i == middle) {
-//       filter_taps[i] = 1 - 2 * CUTOFF_FREQUENCY / SAMPLE_RATE;
+//       filter_taps[i] = 1 - 2 * FILT_CUTOFF_FREQUENCY / FILT_SAMPLE_RATE;
 //     } else {
-//       filter_taps[i] = -sin(2 * PI * CUTOFF_FREQUENCY * (i - middle) / SAMPLE_RATE) / (PI * (i - middle));
+//       filter_taps[i] = -sin(2 * PI * FILT_CUTOFF_FREQUENCY * (i - middle) / FILT_SAMPLE_RATE) / (PI * (i - middle));
 //     }
 //   }
 // }
 
 // void applyFilter(volatile uint16_t arrayAcOx[]) {
 
-//   uint16_t start_index = NUM_TAPS / 2;
-//   uint16_t end_index = NUM_SAMPLES - NUM_TAPS / 2;
+//   uint16_t start_index = FILT_NUM_TAPS / 2;
+//   uint16_t end_index = SIGNAL_SIZE - FILT_NUM_TAPS / 2;
 
 //   for (uint16_t i = start_index; i < end_index; i++) {
 //     volatile uint16_t filtered_value = 0;
-//     for (uint16_t j = 0; j < NUM_TAPS; j++) {
+//     for (uint16_t j = 0; j < FILT_NUM_TAPS; j++) {
 //       filtered_value += arrayAcOx[i + j] * filter_taps[j];
 //     }
 //     filtered_data[i] = filtered_value;
 //   }
 
-//   for(uint16_t i = 0; i < RANGE; i++){
+//   for(uint16_t i = 0; i < SIGNAL_SIZE; i++){
 //     Serial.print(">FilteredSignalACIFRTODO:");
 //     Serial.println(filtered_data[i]);
 //   }
