@@ -10,8 +10,6 @@
 
 /* Includes ----------------------------------------------------------------------------------------------------------*/
 #include <Arduino.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
 
 /* Pin numbers -------------------------------------------------------------------------------------------------------*/
 #define AC_OX_PIN GPIO_NUM_0
@@ -20,44 +18,38 @@
 #define RED_LED_PIN GPIO_NUM_3
 #define IFR_LED_PIN GPIO_NUM_4
 
+#define FBCK_LED_AZUL_PIN GPIO_NUM_10
+#define FBCK_LED_VERD_PIN GPIO_NUM_9
 
 /* Instances -------------------------------------------------------------------------------------------------------*/
-HTTPClient http;
 
 /* Constants ---------------------------------------------------------------------------------------------------------*/
+
+// Filtro de media
 #define WINDOW_AVERAGE 10
 
+// Estabilização de dados
+#define WINDOW_STABILIZE 150
+#define STABILITY_THRESHOLD 200 // Limite para o desvio padrão que define estabilidade
+#define STABLE_READINGS_THRESHOLD 10 // Número de leituras consecutivas para considerar o sinal estável
+#define UNSTABLE_READINGS_THRESHOLD 5 // Número de leituras consecutivas para desconsiderar o sinal
 
-#define WINDOW_STABILIZE 100
-#define MIN_STD_VAR 1900
-#define MAX_STD_VAR 2100
-
-
-#define SIGNAL_SIZE 800
+// Analise de dados
+#define SIGNAL_SIZE 1750
 #define WINDOW_SIZE_MOVE 50
 
-
-#define FILT_SAMPLE_RATE 170 // Hz
-#define FILT_CUTOFF_FREQUENCY 2 // Hz
-#define FILT_NUM_TAPS 51
-
-
-#define INT_SET_FREQ 200
+// Interrução
+#define INT_SET_FREQ 250
 #define INT_PRE_SCALER 80
 #define INT_TIM_FREQ  80000000/INT_PRE_SCALER
 #define INT_TIM_PERI  INT_TIM_FREQ/INT_SET_FREQ
 
 
-#define SSID "Solano"
-#define PASSWORD "solano1234"
-#define SERVER_URL "http://172.20.10.7:5000/"
-
-
 /* Private variables -------------------------------------------------------------------------------------------------*/
 bool flagLedState = true;
 bool flagReadData = false;
-bool flagStable = false;
-
+bool flagStableRED = false;
+bool flagStableIFR = false;
 
 int values[WINDOW_STABILIZE];
 int indice = 0;
@@ -97,14 +89,11 @@ uint16_t valleys[SIGNAL_SIZE];
 float data[SIGNAL_SIZE];
 volatile uint16_t filtered_data[SIGNAL_SIZE];
 
-float filter_taps[FILT_NUM_TAPS];
-
 uint16_t count = 0;
 
 
 // Definição da Interrupção
 hw_timer_t *setTimer = NULL;
-
 
 
 /* Private functions -------------------------------------------------------------------------------------------------*/
@@ -117,8 +106,7 @@ void detectPeaksAndValleys(volatile uint16_t arrayAcOx[]);
 void generateHighPassFilter();
 void applyFilter(volatile uint16_t arrayAcOx[]);
 
-void sendMeasurement(uint16_t bpmValue);
-void connectToWiFi();
+bool checkStability(int* values, int currentIndex);
 
 
 /* Main Application --------------------------------------------------------------------------------------------------*/
@@ -131,13 +119,11 @@ void setup() {
   pinMode(IFR_LED_PIN, OUTPUT);
   pinMode(RED_LED_PIN, OUTPUT);
 
+  pinMode(FBCK_LED_AZUL_PIN, OUTPUT);
+  pinMode(FBCK_LED_VERD_PIN, OUTPUT);
+
   analogReadResolution(12);
 
-  // WiFi.begin(SSID, PASSWORD);
-  
-  // if (WiFi.status() != WL_CONNECTED)
-  //   delay(1000);
-  
 
   setTimer = timerBegin(0, INT_PRE_SCALER, true);
   timerAttachInterrupt(setTimer, &LED_Control, true);
@@ -153,23 +139,22 @@ void loop() { }
 void LedControlTask(void *pvParameters) {
     while(1) {
         if(flagReadData){
+            Serial.print("AQUIIIIIIIIIIIIIIII:");
             timerAlarmDisable(setTimer);    
             for(uint16_t count = 0; count < SIGNAL_SIZE; count++){
-
-              // if (WiFi.status() != WL_CONNECTED)
-              //   connectToWiFi();
-              //  else
-              //   sendMeasurement(signalForAnalyzeAcIFR[count]);
               
                 Serial.print("> SignalACIFR:");
                 Serial.println(signalForAnalyzeAcIFR[count]);
+
+                digitalWrite(FBCK_LED_AZUL_PIN, LOW);
+                digitalWrite(FBCK_LED_VERD_PIN, HIGH);
 
                 vTaskDelay(1/portTICK_PERIOD_MS);
             }
 
             // generateHighPassFilter();
             // applyFilter(signalForAnalyzeAcIFR);
-
+            count = 0;
             flagReadData = false;
             timerAlarmEnable(setTimer);
         }
@@ -184,22 +169,7 @@ void IRAM_ATTR LED_Control(){
     values[indice] = analogRead(AC_OX_PIN);
     indice = (indice + 1) % WINDOW_STABILIZE;
 
-    uint16_t sum = 0;
-
-    for (int i = 0; i < WINDOW_STABILIZE; i++) 
-      sum += values[i];
-    
-    float mean = sum / (float)WINDOW_STABILIZE;
-
-    float sq_sum = 0;
-
-    for (int i = 0; i < WINDOW_STABILIZE; i++) 
-      sq_sum += pow(values[i] - mean, 2);
-    
-    float std_dev = sqrt(sq_sum / WINDOW_STABILIZE);
-
-    Serial.print(">SignalStdIFR:");
-    Serial.println(std_dev);
+    flagStableRED = checkStability(values, WINDOW_STABILIZE);
 
     Serial.print(">Count:");
     Serial.println(count);
@@ -207,27 +177,32 @@ void IRAM_ATTR LED_Control(){
     Serial.print("> SignalACIFRBRUTO:");
     Serial.println(values[indice]);
 
-    if(count >= SIGNAL_SIZE and std_dev > MIN_STD_VAR and std_dev < MAX_STD_VAR){
-      flagReadData = true;
+    if(count >= SIGNAL_SIZE)
+    {
+      // flagReadData = true;
       count = 0;
     }
-    else if (count <= SIGNAL_SIZE and std_dev > MIN_STD_VAR and std_dev < MAX_STD_VAR) {
-        flagReadData = false;
-
+    else if (count <= SIGNAL_SIZE) 
+    {
         MovingAverageFilter(&sumValuesAcIFR, arrayAcOxIFR, &windowAc, &signalForAnalyzeAcIFR[count], WINDOW_AVERAGE, AC_OX_PIN);
         MovingAverageFilter(&sumValuesDcIFR, arrayDcOxIFR, &windowDc, &signalForAnalyzeDcIFR[count], WINDOW_AVERAGE, DC_OX_PIN);
 
         Serial.print("> SignalACIFFiltradoMV:");
         Serial.println(signalForAnalyzeAcIFR[count]);
 
-        count++;
+        digitalWrite(FBCK_LED_AZUL_PIN, HIGH);
+        digitalWrite(FBCK_LED_VERD_PIN, LOW);
 
-      if (!flagStable) 
-        flagStable = true;
-      
-    } else{
+        count++;
+        flagReadData = false;
+
+      if (!flagStableRED) 
+        flagStableRED = true;
+    } 
+    else
+    {
       flagReadData = false;
-      flagStable = false;
+      flagStableRED = false;
       count = 0;
     }
 }
@@ -259,46 +234,54 @@ void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *wi
 }
 
 
-void sendMeasurement(uint16_t bpmValue) {
 
-  String requestBody = "{\"dado\":\"" + String(bpmValue) + "\"}";
-  String url = String(SERVER_URL) + "/dados";
+int stableReadingsCount = 0;
+int unstableReadingsCount = 0;
+float previousStdDev = 0.0;
+float stdDev = 0.0;
 
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
+bool checkStability(int* values, int currentIndex) {
+    
+    float sum = 0.0;
+    float mean = 0.0;
 
-  int httpResponseCode = http.POST(requestBody);
+    // Calculate mean
+    for (int i = currentIndex - WINDOW_STABILIZE + 1; i <= currentIndex; i++) {
+        sum += values[i];
+    }
+    mean = sum / WINDOW_STABILIZE;
+
+    // Calculate standard deviation
+    sum = 0.0;
+    for (int i = currentIndex - WINDOW_STABILIZE + 1; i <= currentIndex; i++)
+        sum += pow(values[i] - mean, 2);
+    
+    previousStdDev = stdDev;
+
+    stdDev = sqrt(sum / WINDOW_STABILIZE);
+
+    // Check stability
+    if (stdDev < STABILITY_THRESHOLD and abs(stdDev - previousStdDev) < 0.1) {
+        stableReadingsCount++;
+        unstableReadingsCount = 0;
+    } else {
+        unstableReadingsCount++;
+        stableReadingsCount = 0;
+    }
 
 
-  if (httpResponseCode > 0) {
-    Serial.print("Resposta do servidor: ");
-    Serial.println(http.getString());
-  } else {
-    Serial.print("Erro na requisição HTTP: ");
-    Serial.println(httpResponseCode);
-  }
+    Serial.print("> abs: ");
+    Serial.println(abs(stdDev - previousStdDev));
 
-  http.end();
-}
+    Serial.print("> StdDev: ");
+    Serial.println(stdDev);
 
+    if (stableReadingsCount >= STABLE_READINGS_THRESHOLD)
+      return true;
 
-void connectToWiFi() {
-
-  Serial.println("Conectando ao WiFi...");
-  WiFi.begin(SSID, PASSWORD);
+    else if (unstableReadingsCount >= UNSTABLE_READINGS_THRESHOLD)
+      return false;
   
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 5) {
-    delay(1000);
-    Serial.print(".");
-    attempts++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConectado ao WiFi");
-  } else {
-    Serial.println("\nFalha ao conectar ao WiFi");
-  }
 }
 
 
@@ -342,16 +325,6 @@ void connectToWiFi() {
 // }
 
 
-// void generateHighPassFilter() {
-//   int middle = FILT_NUM_TAPS / 2;
-//   for (uint16_t i = 0; i < FILT_NUM_TAPS; i++) {
-//     if (i == middle) {
-//       filter_taps[i] = 1 - 2 * FILT_CUTOFF_FREQUENCY / FILT_SAMPLE_RATE;
-//     } else {
-//       filter_taps[i] = -sin(2 * PI * FILT_CUTOFF_FREQUENCY * (i - middle) / FILT_SAMPLE_RATE) / (PI * (i - middle));
-//     }
-//   }
-// }
 
 // void applyFilter(volatile uint16_t arrayAcOx[]) {
 
