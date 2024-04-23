@@ -5,6 +5,11 @@
 * @version V0.1.0
 * @date 18-Abr-2024
 * @brief code for Oximeter project - Instrumentação Biomedica 2.
+* 
+*
+* Fs = 8ms => tempo entre uma interrupção e outra interrupção que da 125 Hz
+* Coletando 10 segundos de dados => 1250 dados
+
 *************************************************************************************************************
 */
 
@@ -30,12 +35,12 @@
 
 // Estabilização de dados
 #define WINDOW_STABILIZE 150
-#define STABILITY_THRESHOLD 200 // Limite para o desvio padrão que define estabilidade
+#define STABILITY_THRESHOLD 155 // Limite para o desvio padrão que define estabilidade
 #define STABLE_READINGS_THRESHOLD 10 // Número de leituras consecutivas para considerar o sinal estável
 #define UNSTABLE_READINGS_THRESHOLD 5 // Número de leituras consecutivas para desconsiderar o sinal
 
 // Analise de dados
-#define SIGNAL_SIZE 1750
+#define SIGNAL_SIZE 1250
 #define WINDOW_SIZE_MOVE 50
 
 // Interrução
@@ -51,8 +56,9 @@ bool flagReadData = false;
 bool flagStableRED = false;
 bool flagStableIFR = false;
 
-int values[WINDOW_STABILIZE];
-int indice = 0;
+// Variaveis para verificar estabilidade dos dados
+uint16_t verifyStabilizeData[WINDOW_STABILIZE];
+uint8_t countWinSize = 0;
 
 
 uint8_t windowAc = 0;
@@ -74,10 +80,8 @@ uint16_t sumValuesDcRED = 0;
 
 uint16_t signalForAnalyzeAcRED[SIGNAL_SIZE];
 uint16_t signalForAnalyzeDcRED[SIGNAL_SIZE];
-
 uint16_t signalForAnalyzeAcIFR[SIGNAL_SIZE];
 uint16_t signalForAnalyzeDcIFR[SIGNAL_SIZE];
-
 
 uint16_t peakCount = 0;
 uint16_t valleyCount = 0;
@@ -97,7 +101,7 @@ hw_timer_t *setTimer = NULL;
 
 
 /* Private functions -------------------------------------------------------------------------------------------------*/
-void LedControlTask(void *pvParameters);
+void processDataTask(void *pvParameters);
 void IRAM_ATTR LED_Control();
 
 void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN);
@@ -106,9 +110,9 @@ void detectPeaksAndValleys(volatile uint16_t arrayAcOx[]);
 void generateHighPassFilter();
 void applyFilter(volatile uint16_t arrayAcOx[]);
 
-bool checkStability(int* values, int currentIndex);
+bool checkStability(uint16_t* values, int currentIndex);
 
-
+void find_valleys_and_peaks(uint16_t* signal, uint16_t* valleys, uint16_t* peaks);
 /* Main Application --------------------------------------------------------------------------------------------------*/
 void setup() {
 
@@ -124,24 +128,22 @@ void setup() {
 
   analogReadResolution(12);
 
-
   setTimer = timerBegin(0, INT_PRE_SCALER, true);
   timerAttachInterrupt(setTimer, &LED_Control, true);
   timerAlarmWrite(setTimer, INT_TIM_PERI, true);
   timerAlarmEnable(setTimer);
 
-  xTaskCreate(LedControlTask, "LEDs Control Task", 4096, NULL, 1, NULL);
-
+  xTaskCreate(processDataTask, "LEDs Control Task", 4096, NULL, 1, NULL);
 }
 
 void loop() { }
 
-void LedControlTask(void *pvParameters) {
+void processDataTask(void *pvParameters) {
     while(1) {
         if(flagReadData){
             Serial.print("AQUIIIIIIIIIIIIIIII:");
             timerAlarmDisable(setTimer);    
-            for(uint16_t count = 0; count < SIGNAL_SIZE; count++){
+            for(uint16_t count = 210; count < SIGNAL_SIZE - 190; count++){
               
                 Serial.print("> SignalACIFR:");
                 Serial.println(signalForAnalyzeAcIFR[count]);
@@ -151,6 +153,7 @@ void LedControlTask(void *pvParameters) {
 
                 vTaskDelay(1/portTICK_PERIOD_MS);
             }
+            find_valleys_and_peaks(signalForAnalyzeAcIFR, valleys, peaks);
 
             // generateHighPassFilter();
             // applyFilter(signalForAnalyzeAcIFR);
@@ -162,47 +165,48 @@ void LedControlTask(void *pvParameters) {
     }
 }
 
+unsigned long lastInterruptTime = 0;
+
 void IRAM_ATTR LED_Control(){
 
-  if(flagLedState){
+  if(flagLedState){ // Se a flag LED for verdadeira entra na condição e lê os dados para o IFR
 
-    values[indice] = analogRead(AC_OX_PIN);
-    indice = (indice + 1) % WINDOW_STABILIZE;
+    //Verifica se os dados estabilizaram
+    verifyStabilizeData[countWinSize] = analogRead(AC_OX_PIN);
+    countWinSize = (countWinSize + 1) % WINDOW_STABILIZE;
 
-    flagStableRED = checkStability(values, WINDOW_STABILIZE);
+    flagStableRED = checkStability(verifyStabilizeData, WINDOW_STABILIZE);
 
     Serial.print(">Count:");
     Serial.println(count);
 
-    Serial.print("> SignalACIFRBRUTO:");
-    Serial.println(values[indice]);
-
-    if(count >= SIGNAL_SIZE)
+    // Se os dados estabilizaram e preencheram todo o array de dados entra nessa condição para envio de dados 
+    if(count >= SIGNAL_SIZE and flagStableRED)
     {
-      // flagReadData = true;
+      flagReadData = true;
       count = 0;
     }
-    else if (count <= SIGNAL_SIZE) 
+
+    // Se os dados estabilizaram e o array de dados ainda n está cheio entra na condição para preencher ele
+    else if (count <= SIGNAL_SIZE and flagStableRED) 
     {
-        MovingAverageFilter(&sumValuesAcIFR, arrayAcOxIFR, &windowAc, &signalForAnalyzeAcIFR[count], WINDOW_AVERAGE, AC_OX_PIN);
-        MovingAverageFilter(&sumValuesDcIFR, arrayDcOxIFR, &windowDc, &signalForAnalyzeDcIFR[count], WINDOW_AVERAGE, DC_OX_PIN);
+      MovingAverageFilter(&sumValuesAcIFR, arrayAcOxIFR, &windowAc, &signalForAnalyzeAcIFR[count], WINDOW_AVERAGE, AC_OX_PIN);
+      MovingAverageFilter(&sumValuesDcIFR, arrayDcOxIFR, &windowDc, &signalForAnalyzeDcIFR[count], WINDOW_AVERAGE, DC_OX_PIN);
 
-        Serial.print("> SignalACIFFiltradoMV:");
-        Serial.println(signalForAnalyzeAcIFR[count]);
+      Serial.print("> SignalACIFFiltradoMV:");
+      Serial.println(signalForAnalyzeAcIFR[count]);
 
-        digitalWrite(FBCK_LED_AZUL_PIN, HIGH);
-        digitalWrite(FBCK_LED_VERD_PIN, LOW);
+      digitalWrite(FBCK_LED_AZUL_PIN, HIGH);
+      digitalWrite(FBCK_LED_VERD_PIN, LOW);
 
-        count++;
-        flagReadData = false;
-
-      if (!flagStableRED) 
-        flagStableRED = true;
+      count++;
+      flagReadData = false;
     } 
+
+
     else
     {
       flagReadData = false;
-      flagStableRED = false;
       count = 0;
     }
 }
@@ -233,14 +237,12 @@ void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *wi
   *meanValue = *sumValues / windowSize;
 }
 
-
-
 int stableReadingsCount = 0;
 int unstableReadingsCount = 0;
 float previousStdDev = 0.0;
 float stdDev = 0.0;
 
-bool checkStability(int* values, int currentIndex) {
+bool checkStability(uint16_t* values, int currentIndex) {
     
     float sum = 0.0;
     float mean = 0.0;
@@ -256,22 +258,16 @@ bool checkStability(int* values, int currentIndex) {
     for (int i = currentIndex - WINDOW_STABILIZE + 1; i <= currentIndex; i++)
         sum += pow(values[i] - mean, 2);
     
-    previousStdDev = stdDev;
-
     stdDev = sqrt(sum / WINDOW_STABILIZE);
 
     // Check stability
-    if (stdDev < STABILITY_THRESHOLD and abs(stdDev - previousStdDev) < 0.1) {
+    if (stdDev < STABILITY_THRESHOLD) {
         stableReadingsCount++;
         unstableReadingsCount = 0;
     } else {
         unstableReadingsCount++;
         stableReadingsCount = 0;
     }
-
-
-    Serial.print("> abs: ");
-    Serial.println(abs(stdDev - previousStdDev));
 
     Serial.print("> StdDev: ");
     Serial.println(stdDev);
@@ -281,73 +277,49 @@ bool checkStability(int* values, int currentIndex) {
 
     else if (unstableReadingsCount >= UNSTABLE_READINGS_THRESHOLD)
       return false;
-  
+
+  return false;
 }
 
 
-// void detectPeaksAndValleys(volatile uint16_t arrayAcOx[]) {
-    
-//   uint16_t PeakSum = 0;
-//   uint16_t ValleySum = 0;
-
-//   for (uint16_t i = 750; i < SIGNAL_SIZE - WINDOW_SIZE_MOVE; i++) {
-
-//     uint16_t maxVal = arrayAcOx[i];
-//     uint16_t minVal = arrayAcOx[i];
-
-//     int maxPos = i;
-//     int minPos = i;
-
-
-//     for (int j = i; j < i + WINDOW_SIZE_MOVE; j++) {
-//       if (arrayAcOx[j] > maxVal) {
-//         maxVal = arrayAcOx[j];
-//         maxPos = j;
-//       }
-//       if (arrayAcOx[j] < minVal) {
-//         minVal = arrayAcOx[j];
-//         minPos = j;
-//       }
-//     }
-
-//     if (maxPos == i) {
-//       peaks[peakCount] = maxVal;
-//       PeakSum += maxVal;
-//       peakCount++;
-//     }
-//     if (minPos == i) {
-//       valleys[valleyCount] = minVal;
-//       ValleySum += minVal;
-//       valleyCount++;
-//     }
-//   }
-//   Serial.printf("Peaks: %d || Valley: %d || valleyCount: %d || peakCount: %d \n", PeakSum, ValleySum, valleyCount, peakCount);
-// }
+#define WINDOW_SIZE 10
+#define MIN_DISTANCE_BETWEEN_VALLEYS 30
+#define PEAK_WINDOW_SIZE 120
 
 
 
-// void applyFilter(volatile uint16_t arrayAcOx[]) {
+void find_valleys_and_peaks(uint16_t* signal, uint16_t* valleys, uint16_t* peaks) {
 
-//   uint16_t start_index = FILT_NUM_TAPS / 2;
-//   uint16_t end_index = SIGNAL_SIZE - FILT_NUM_TAPS / 2;
+    int last_valley_index = -MIN_DISTANCE_BETWEEN_VALLEYS;
+    int valleys_count = 0;
 
-//   for (uint16_t i = start_index; i < end_index; i++) {
-//     volatile uint16_t filtered_value = 0;
-//     for (uint16_t j = 0; j < FILT_NUM_TAPS; j++) {
-//       filtered_value += arrayAcOx[i + j] * filter_taps[j];
-//     }
-//     filtered_data[i] = filtered_value;
-//   }
+    for (uint16_t i = 200 + WINDOW_SIZE; i < SIGNAL_SIZE - WINDOW_SIZE - 200; i++) {
+        bool is_valley = true;
+        for (int j = i - WINDOW_SIZE; j <= i + WINDOW_SIZE; j++) {
+            if (signal[j] < signal[i]) {
+                is_valley = false;
+                break;
+            }
+        }
+        if (is_valley && i - last_valley_index >= MIN_DISTANCE_BETWEEN_VALLEYS) {
+            *valleys++ = signal[i];
+            last_valley_index = i;
+            valleys_count++;
 
-//   for(uint16_t i = 0; i < SIGNAL_SIZE; i++){
-//     Serial.print(">FilteredSignalACIFRTODO:");
-//     Serial.println(filtered_data[i]);
-//   }
+            uint16_t peak = signal[i];
+            for (int j = i + 1; j < i + PEAK_WINDOW_SIZE && j < SIGNAL_SIZE; j++) {
+                if (signal[j] > peak) {
+                    peak = signal[j];
+                }
+            }
+            
+            *peaks++ = peak;
 
-//   for(uint16_t i = 200; i < 600; i++){
-//     Serial.print(">FilteredSignalACIFRCORTADO:");
-//     Serial.println(filtered_data[i]);
-//   }
+            Serial.print("> signal[i]: ");
+            Serial.println(signal[i]);
 
-//   detectPeaksAndValleys(filtered_data);
-// }
+            Serial.print("> peak: ");
+            Serial.println(peak);
+        }
+    }
+}
