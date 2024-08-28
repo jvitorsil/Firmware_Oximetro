@@ -189,6 +189,7 @@ void setup() {
   pAdvertising->addServiceUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
   pAdvertising->start();
 
+  vTaskDelay(1000/portTICK_PERIOD_MS);
 
   setTimer = timerBegin(0, INT_PRE_SCALER, true);
   timerAttachInterrupt(setTimer, &LED_Control, true);
@@ -202,30 +203,6 @@ void setup() {
 void loop() {
 }
 
-void processDataTask(void *pvParameters) {
-    while(1) {
-        if(flagReadData){
-
-            timerAlarmDisable(setTimer);    
-
-            for(uint16_t count = 525; count < SIGNAL_SIZE - 525; count++){
-              pCurveCharacteristic->setValue(signalForAnalyzeAcIFR[count]);
-              pCurveCharacteristic->notify(); 
-              // Serial.print("Curve: ");Serial.println(signalForAnalyzeAcIFR[count]);
-              vTaskDelay(80/portTICK_PERIOD_MS);
-            }
-            
-            find_valleys_and_peaks(flagBPM, signalForAnalyzeAcIFR, signalForAnalyzeDcIFR, valleysIFR, peaksIFR);
-            find_valleys_and_peaks(!flagBPM, signalForAnalyzeAcRED, signalForAnalyzeDcRED, valleysRED, peaksRED);
-
-            count = 0;
-            flagReadData = false;
-            timerAlarmEnable(setTimer);
-        }
-      vTaskDelay(1 / portTICK_PERIOD_MS);
-    }
-}
-
 
 void IRAM_ATTR LED_Control(){
 
@@ -236,12 +213,9 @@ void IRAM_ATTR LED_Control(){
     countWinSize = (countWinSize + 1) % WINDOW_STABILIZE;
 
     flagStable = checkStability( verifyStabilizeData, WINDOW_STABILIZE);
-
-    Serial.print(">Count:");
-    Serial.println(count);
-
-    Serial.print("> Signal AC IFR Raw:");
-    Serial.println(verifyStabilizeData[countWinSize]);
+    
+    Serial.print(">Count:");Serial.println(count);
+    Serial.print("> Signal AC IFR Raw:");Serial.println(verifyStabilizeData[countWinSize]);
 
     // Se os dados estabilizaram e preencheram todo o array de dados entra nessa condição para envio de dados 
     if(count >= SIGNAL_SIZE and flagStable)
@@ -258,8 +232,7 @@ void IRAM_ATTR LED_Control(){
       MovingAverageFilter(&sumValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &signalForAnalyzeAcIFR[count], WINDOW_AVERAGE, AC_OX_PIN);
       MovingAverageFilter(&sumValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &signalForAnalyzeDcIFR[count], WINDOW_AVERAGE, DC_OX_PIN);
 
-      Serial.print("> Signal AC IFR Filt:");
-      Serial.println(signalForAnalyzeAcIFR[count]);
+      Serial.print("> Signal AC IFR Filt:");Serial.println(signalForAnalyzeAcIFR[count]);
 
       digitalWrite(FBCK_LED_AZUL_PIN, HIGH);
       digitalWrite(FBCK_LED_VERD_PIN, LOW);
@@ -278,23 +251,50 @@ void IRAM_ATTR LED_Control(){
 }
   else{
 
-    if (count <= SIGNAL_SIZE and flagStable) 
-    {
-      MovingAverageFilter(&sumValuesAcRED, arrayAcOxRED, &windowAcRED, &signalForAnalyzeAcRED[count], WINDOW_AVERAGE, AC_OX_PIN);
-      MovingAverageFilter(&sumValuesDcRED, arrayDcOxRED, &windowDcRED, &signalForAnalyzeDcRED[count], WINDOW_AVERAGE, DC_OX_PIN);
+    // if (count <= SIGNAL_SIZE and flagStable) 
+    // {
+    //   MovingAverageFilter(&sumValuesAcRED, arrayAcOxRED, &windowAcRED, &signalForAnalyzeAcRED[count], WINDOW_AVERAGE, AC_OX_PIN);
+    //   MovingAverageFilter(&sumValuesDcRED, arrayDcOxRED, &windowDcRED, &signalForAnalyzeDcRED[count], WINDOW_AVERAGE, DC_OX_PIN);
 
-      Serial.print("> Signal AC RED Filt:");
-      Serial.println(signalForAnalyzeAcRED[count]);
+    //   Serial.print("> Signal AC RED Filt:");Serial.println(signalForAnalyzeAcRED[count]);
 
-      count++;
-      flagReadData = false;
-    } 
+    //   count++;
+    //   flagReadData = false;
+    // } 
   }
 
   flagLedState = !flagLedState;
   digitalWrite(IFR_LED_PIN, flagLedState);
   digitalWrite(RED_LED_PIN, !flagLedState);
 }
+
+void processDataTask(void *pvParameters) {
+    while(1) {
+        if(flagReadData){
+
+            timerAlarmDisable(setTimer);    
+
+            for(uint16_t count = 525; count < SIGNAL_SIZE - 525; count++){
+              
+              uint16_t value = map(*(&signalForAnalyzeAcIFR[count]), 2250, 2360, 0, 255);
+
+              Serial.print("> plot:");Serial.println(value);
+              pCurveCharacteristic->setValue(value);
+              pCurveCharacteristic->notify(); 
+              vTaskDelay(20/portTICK_PERIOD_MS);
+            }
+            
+            find_valleys_and_peaks(flagBPM, signalForAnalyzeAcIFR, signalForAnalyzeDcIFR, valleysIFR, peaksIFR);
+            find_valleys_and_peaks(!flagBPM, signalForAnalyzeAcRED, signalForAnalyzeDcRED, valleysRED, peaksRED);
+
+            count = 0;
+            flagReadData = false;
+            timerAlarmEnable(setTimer);
+        }
+      vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+}
+
 
 void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN){
   
@@ -334,8 +334,7 @@ bool checkStability(uint16_t* values, int currentIndex) {
         stableReadingsCount = 0;
     }
 
-    Serial.print("> Desvio Padrão: ");
-    Serial.println(stdDev);
+    Serial.print("> Desvio Padrão: ");Serial.println(stdDev);
 
     if (stableReadingsCount >= STABLE_READINGS_THRESHOLD)
       return true;
@@ -352,6 +351,7 @@ void find_valleys_and_peaks(bool calBPM, uint16_t* signalAC, uint16_t* signalDC,
     int last_peak_index = -MIN_DISTANCE_BETWEEN_PEAKS;
 
     for (uint16_t i = 200 + WINDOW_SIZE; i < SIGNAL_SIZE - WINDOW_SIZE - 200; i++) {
+        
         bool is_valley = true;
         for (int j = i - WINDOW_SIZE; j <= i + WINDOW_SIZE; j++) {
             if (signalAC[j] < signalAC[i]) {
@@ -377,27 +377,15 @@ void find_valleys_and_peaks(bool calBPM, uint16_t* signalAC, uint16_t* signalDC,
             if (peakIndex != i) {
                 *peaks++ = peak;
                 last_peak_index = peakIndex;
-
-                Serial.print(" || Valley: ");
-                Serial.print(signalAC[last_valley_index]);
-                Serial.print(" || Peak: ");
-                Serial.print(signalAC[last_peak_index]);
-                Serial.print("  || last_valley_index: ");
-                Serial.print(last_valley_index);
-                Serial.print(" || last_peak_index: ");
-                Serial.println(last_peak_index);
-                vTaskDelay(1/portTICK_PERIOD_MS);
-
             }
         }
     }
 
     if(calBPM){
-      uint16_t bpm = 5100/(0.68*((last_peak_index - last_valley_index)*1.6));
+      uint16_t bpm = 5100/(0.68*((last_peak_index - last_valley_index)*1.4));
       uint16_t SPO2 = random(95, 101);
 
-      Serial.print("  bpm: ");
-      Serial.println(bpm);
+      Serial.print("  bpm: ");Serial.println(bpm);
 
       pCharacteristic->setValue(bpm);
       pCharacteristic->notify();
