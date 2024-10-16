@@ -1,40 +1,27 @@
 /**
 **************************************************************************************************************
 * @file main.cpp
-* @author João Vitor Silva <joaovitor_s2015@ufu.br>
+* @author João Vitor Silva
 * @version V0.1.0
 * @date 18-Abr-2024
 * @brief code for Oximeter project - Instrumentação Biomedica 2.
 * 
-*
 * Fs = 8ms => tempo entre uma interrupção e outra interrupção que da 125 Hz
 * Coletando 10 segundos de dados => 1250 dados
-
 *************************************************************************************************************
 */
 
 /* Includes ----------------------------------------------------------------------------------------------------------*/
 #include <Arduino.h>
-#include <NimBLEDevice.h>
-
+#include "ble_config.h"
+#include "led_state.h"
 
 /* Pin numbers -------------------------------------------------------------------------------------------------------*/
 #define AC_OX_PIN GPIO_NUM_0
 #define DC_OX_PIN GPIO_NUM_1
 
-#define RED_LED_PIN GPIO_NUM_3
-#define IFR_LED_PIN GPIO_NUM_4
-
-#define FBCK_LED_AZUL_PIN GPIO_NUM_10
-#define FBCK_LED_VERD_PIN GPIO_NUM_9
-
 /* Instances -------------------------------------------------------------------------------------------------------*/
-
-NimBLEServer* pServer;
-NimBLECharacteristic* pCharacteristic;
-NimBLECharacteristic* pNewCharacteristic;
-NimBLECharacteristic* pWriteCharacteristic;
-NimBLECharacteristic* pCurveCharacteristic;
+BLEConfig ble;
 
 /* Constants ---------------------------------------------------------------------------------------------------------*/
 
@@ -51,29 +38,27 @@ NimBLECharacteristic* pCurveCharacteristic;
 #define SIGNAL_SIZE 1250
 #define WINDOW_SIZE_MOVE 50
 
-// Interrução
+// Configuração da interrupção
 #define INT_SET_FREQ 250
 #define INT_PRE_SCALER 80
 #define INT_TIM_FREQ  80000000/INT_PRE_SCALER
 #define INT_TIM_PERI  INT_TIM_FREQ/INT_SET_FREQ
 
-
 // Definição de janelas para detecção de picos e vales
 #define WINDOW_SIZE 15
 #define MIN_DISTANCE_BETWEEN_VALLEYS 50
 #define MIN_DISTANCE_BETWEEN_PEAKS 50
-
 #define PEAK_WINDOW_SIZE 65
 
 /* Private variables -------------------------------------------------------------------------------------------------*/
-bool flagLedState = true;
-bool flagReadData = false;
-bool flagStable = false;
-bool flagBPM = true;
-// Variaveis para verificar estabilidade dos dados
+volatile bool flagLedState = true;
+volatile bool flagReadData = false;
+volatile bool flagStable = false;
+volatile bool flagBPM = true;
+
+// Variáveis para verificar estabilidade dos dados
 uint16_t verifyStabilizeData[WINDOW_STABILIZE];
 uint8_t countWinSize = 0;
-
 
 uint8_t windowAcRED = 0;
 uint8_t windowDcRED = 0;
@@ -116,13 +101,10 @@ int unstableReadingsCount = 0;
 float previousStdDev = 0.0;
 float stdDev = 0.0;
 
-
 uint16_t count = 0;
-
 
 // Definição da Interrupção
 hw_timer_t *setTimer = NULL;
-
 
 /* Private functions -------------------------------------------------------------------------------------------------*/
 
@@ -130,176 +112,124 @@ void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *wi
 void find_valleys_and_peaks(bool calBPM, uint16_t* signalAC, uint16_t* signalDC, uint16_t* valleys, uint16_t* peaks);
 bool checkStability(uint16_t* values, int currentIndex);
 void processDataTask(void *pvParameters);
+void readData(int8_t acPin, int8_t dcPin, uint16_t* acArray, uint16_t* dcArray, uint16_t* signalAc, uint16_t* signalDc, uint16_t* sumValuesAc, uint16_t* sumValuesDc, uint8_t* windowAc, uint8_t* windowDc, bool isRedLed);
+float calculateRatio(uint16_t* acRed, uint16_t* dcRed, uint16_t* acIR, uint16_t* dcIR, uint16_t start, uint16_t end);
 void IRAM_ATTR LED_Control();
-
-
-
 
 /* Main Application --------------------------------------------------------------------------------------------------*/
 void setup() {
-
   setCpuFrequencyMhz(80);
-
   Serial.begin(115200);
-  
-  pinMode(IFR_LED_PIN, OUTPUT);
-  pinMode(RED_LED_PIN, OUTPUT);
-
-  pinMode(FBCK_LED_AZUL_PIN, OUTPUT);
-  pinMode(FBCK_LED_VERD_PIN, OUTPUT);
-
   analogReadResolution(12);
-
-  NimBLEDevice::init("OxiMed <3"); // Nome do Bluetooth
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY); // Define o tipo de pareamento
-  NimBLEDevice::setSecurityAuth(true, true, true); // Habilita o pareamento com autenticação e solicitação de PIN
-
-  pServer = NimBLEDevice::createServer();
-  NimBLEService* pService = pServer->createService("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
-  pWriteCharacteristic = pService->createCharacteristic(
-                   "f14a557e-a13d-4b00-9353-913027a5cd89",
-                   NIMBLE_PROPERTY::READ |
-                   NIMBLE_PROPERTY::WRITE |
-                   NIMBLE_PROPERTY::NOTIFY
-                 );
-
-  pCharacteristic = pService->createCharacteristic(
-                   "beb5483e-36e1-4688-b7f5-ea07361b26a8",
-                   NIMBLE_PROPERTY::READ |
-                   NIMBLE_PROPERTY::WRITE |
-                   NIMBLE_PROPERTY::NOTIFY
-                 );
-
-  pNewCharacteristic = pService->createCharacteristic(
-                   "26e2b12b-85f0-4f3f-9fdd-91d114270e6e",
-                   NIMBLE_PROPERTY::READ |
-                   NIMBLE_PROPERTY::WRITE |
-                   NIMBLE_PROPERTY::NOTIFY
-                 );
-
-  pCurveCharacteristic = pService->createCharacteristic(
-                   "26e2b12b-85f0-4f3f-9fdd-91d114270ea5",
-                   NIMBLE_PROPERTY::READ |
-                   NIMBLE_PROPERTY::WRITE |
-                   NIMBLE_PROPERTY::NOTIFY
-                 );
-  
-  pService->start();
-  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
-  pAdvertising->start();
-
-  vTaskDelay(1000/portTICK_PERIOD_MS);
+  ble.init();
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
 
   setTimer = timerBegin(0, INT_PRE_SCALER, true);
   timerAttachInterrupt(setTimer, &LED_Control, true);
   timerAlarmWrite(setTimer, INT_TIM_PERI, true);
   timerAlarmEnable(setTimer);
 
-  xTaskCreate(processDataTask, "LEDs Control Task", 4096, NULL, 1, NULL);
-
+  xTaskCreate(Leds_task, "Feedback Leds Task", 8 * 1024, NULL, 4, NULL);
+  xTaskCreate(processDataTask, "LEDs Control Task", 8 * 1024, NULL, 1, NULL);
 }
 
-void loop() {
-}
+void loop() { }
 
+void IRAM_ATTR LED_Control() {
+  static bool isRedLed = false;
 
-void IRAM_ATTR LED_Control(){
-
-  if(flagLedState){ // Se a flag LED for verdadeira entra na condição e lê os dados para o IFR
-
-    //Verifica se os dados estabilizaram
-    verifyStabilizeData[countWinSize] = analogRead(AC_OX_PIN);
-    countWinSize = (countWinSize + 1) % WINDOW_STABILIZE;
-
-    flagStable = checkStability( verifyStabilizeData, WINDOW_STABILIZE);
-    
-    Serial.print(">Count:");Serial.println(count);
-    Serial.print("> Signal AC IFR Raw:");Serial.println(verifyStabilizeData[countWinSize]);
-
-    // Se os dados estabilizaram e preencheram todo o array de dados entra nessa condição para envio de dados 
-    if(count >= SIGNAL_SIZE and flagStable)
-    {
-      flagReadData = true;
-      count = 0;
-      digitalWrite(FBCK_LED_AZUL_PIN, LOW);
-      digitalWrite(FBCK_LED_VERD_PIN, HIGH);
-    }
-
-    // Se os dados estabilizaram e o array de dados ainda n está cheio entra na condição para preencher ele
-    else if (count <= SIGNAL_SIZE and flagStable) 
-    {
-      MovingAverageFilter(&sumValuesAcIFR, arrayAcOxIFR, &windowAcIFR, &signalForAnalyzeAcIFR[count], WINDOW_AVERAGE, AC_OX_PIN);
-      MovingAverageFilter(&sumValuesDcIFR, arrayDcOxIFR, &windowDcIFR, &signalForAnalyzeDcIFR[count], WINDOW_AVERAGE, DC_OX_PIN);
-
-      Serial.print("> Signal AC IFR Filt:");Serial.println(signalForAnalyzeAcIFR[count]);
-
-      digitalWrite(FBCK_LED_AZUL_PIN, HIGH);
-      digitalWrite(FBCK_LED_VERD_PIN, LOW);
-
-      count++;
-      flagReadData = false;
-    } 
-
-    else
-    {
-      flagReadData = false;
-      count = 0;
-      digitalWrite(FBCK_LED_AZUL_PIN, LOW);
-      digitalWrite(FBCK_LED_VERD_PIN, LOW);
-    }
-}
-  else{
-
-    // if (count <= SIGNAL_SIZE and flagStable) 
-    // {
-    //   MovingAverageFilter(&sumValuesAcRED, arrayAcOxRED, &windowAcRED, &signalForAnalyzeAcRED[count], WINDOW_AVERAGE, AC_OX_PIN);
-    //   MovingAverageFilter(&sumValuesDcRED, arrayDcOxRED, &windowDcRED, &signalForAnalyzeDcRED[count], WINDOW_AVERAGE, DC_OX_PIN);
-
-    //   Serial.print("> Signal AC RED Filt:");Serial.println(signalForAnalyzeAcRED[count]);
-
-    //   count++;
-    //   flagReadData = false;
-    // } 
+  if (isRedLed) {
+    readData(AC_OX_PIN, DC_OX_PIN, arrayAcOxRED, arrayDcOxRED, signalForAnalyzeAcRED, signalForAnalyzeDcRED, &sumValuesAcRED, &sumValuesDcRED, &windowAcRED, &windowDcRED, isRedLed);
+  } else {
+    readData(AC_OX_PIN, DC_OX_PIN, arrayAcOxIFR, arrayDcOxIFR, signalForAnalyzeAcIFR, signalForAnalyzeDcIFR, &sumValuesAcIFR, &sumValuesDcIFR, &windowAcIFR, &windowDcIFR, isRedLed);
   }
 
-  flagLedState = !flagLedState;
-  digitalWrite(IFR_LED_PIN, flagLedState);
-  digitalWrite(RED_LED_PIN, !flagLedState);
+  digitalWrite(IFR_LED_PIN, isRedLed);
+  digitalWrite(RED_LED_PIN, !isRedLed);  
+  isRedLed = !isRedLed;
+}
+
+
+void readData(int8_t acPin, int8_t dcPin, uint16_t* acArray, uint16_t* dcArray, uint16_t* signalAc, uint16_t* signalDc, uint16_t* sumValuesAc, uint16_t* sumValuesDc, uint8_t* windowAc, uint8_t* windowDc, bool isRedLed) {
+  static uint16_t countRed = 0;
+  static uint16_t countIFR = 0;
+  uint16_t* count = isRedLed ? &countRed : &countIFR;
+
+  verifyStabilizeData[countWinSize] = analogRead(acPin);
+  countWinSize = (countWinSize + 1) % WINDOW_STABILIZE;
+
+  flagStable = checkStability(verifyStabilizeData, WINDOW_STABILIZE);
+
+  if (isRedLed) {
+    Serial.print(">Count RED:"); Serial.println(*count);
+    Serial.print("> Signal AC RED Raw:"); Serial.println(verifyStabilizeData[countWinSize]);
+  } else {
+    Serial.print(">Count IF:"); Serial.println(*count);
+    Serial.print("> Signal AC IFR Raw:"); Serial.println(verifyStabilizeData[countWinSize]);
+  }
+
+  if (*count >= SIGNAL_SIZE && flagStable) {
+    *count = 0;
+    flagReadData = true;
+    Leds_setColorAndMode(GREEN, CONTINUOUS);
+  } else if (*count < SIGNAL_SIZE && flagStable) {
+    MovingAverageFilter(sumValuesAc, acArray, windowAc, &signalAc[*count], WINDOW_AVERAGE, acPin);
+    MovingAverageFilter(sumValuesDc, dcArray, windowDc, &signalDc[*count], WINDOW_AVERAGE, dcPin);
+
+    if (isRedLed) {
+      Serial.print("> Signal AC RED Filt:"); Serial.println(signalAc[*count]);
+      Serial.print("> Signal DC RED Filt:"); Serial.println(signalDc[*count]);
+    } else {
+      Serial.print("> Signal AC IFR Filt:"); Serial.println(signalAc[*count]);
+      Serial.print("> Signal DC IFR Filt:"); Serial.println(signalDc[*count]);
+    }
+
+    (*count)++;
+    flagReadData = false;
+    Leds_setColorAndMode(BLUE, CONTINUOUS);
+  } else {
+    *count = 0;
+    flagReadData = false;
+    Leds_setColor(NO_COLOR);
+  }
 }
 
 void processDataTask(void *pvParameters) {
-    while(1) {
-        if(flagReadData){
+  while (1) {
+    if (flagReadData) {
+      timerAlarmDisable(setTimer);
 
-            timerAlarmDisable(setTimer);    
+      for (uint16_t count = 200; count < SIGNAL_SIZE - 200; count++) {
+        // uint16_t value = map(*(&signalForAnalyzeAcRED[count]), 2250, 2360, 0, 255);
+        Serial.print("> plot RED:"); Serial.println(signalForAnalyzeAcRED[count]);
+        Serial.print("> plot IFR:"); Serial.println(signalForAnalyzeAcIFR[count]);
 
-            for(uint16_t count = 525; count < SIGNAL_SIZE - 525; count++){
-              
-              uint16_t value = map(*(&signalForAnalyzeAcIFR[count]), 2250, 2360, 0, 255);
+        // ble.getCurveCharacteristic()->setValue(value);
+        // ble.getCurveCharacteristic()->notify();
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+      }
 
-              Serial.print("> plot:");Serial.println(value);
-              pCurveCharacteristic->setValue(value);
-              pCurveCharacteristic->notify(); 
-              vTaskDelay(20/portTICK_PERIOD_MS);
-            }
-            
-            find_valleys_and_peaks(flagBPM, signalForAnalyzeAcIFR, signalForAnalyzeDcIFR, valleysIFR, peaksIFR);
-            find_valleys_and_peaks(!flagBPM, signalForAnalyzeAcRED, signalForAnalyzeDcRED, valleysRED, peaksRED);
+      find_valleys_and_peaks(flagBPM, signalForAnalyzeAcIFR, signalForAnalyzeDcIFR, valleysIFR, peaksIFR);
+      find_valleys_and_peaks(!flagBPM, signalForAnalyzeAcRED, signalForAnalyzeDcRED, valleysRED, peaksRED);
 
-            count = 0;
-            flagReadData = false;
-            timerAlarmEnable(setTimer);
-        }
-      vTaskDelay(1 / portTICK_PERIOD_MS);
+      // Calcular SpO2 usando a janela de dados de 525 até SIGNAL_SIZE - 525
+      uint16_t start = 200;
+      uint16_t end = SIGNAL_SIZE - 200;
+      float ratio = calculateRatio(signalForAnalyzeAcRED, signalForAnalyzeDcRED, signalForAnalyzeAcIFR, signalForAnalyzeDcIFR, start, end);
+      uint16_t spo2 = 2497.06 * ratio - 2397.84;
+      Serial.print("ratio: "); Serial.println(ratio, 8);
+      Serial.print("  SpO2: "); Serial.println(spo2);
+
+      count = 0;
+      flagReadData = false;
+      timerAlarmEnable(setTimer);
     }
+    vTaskDelay(1 / portTICK_PERIOD_MS);
+  }
 }
 
-
-void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN){
-  
+void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *window, uint16_t *meanValue, const uint8_t windowSize, const uint8_t PIN) {
   uint16_t OxValueReading = analogRead(PIN);
-
   *sumValues -= arrayValues[*window];
   *sumValues += OxValueReading;
   arrayValues[*window] = OxValueReading;
@@ -308,95 +238,117 @@ void MovingAverageFilter(uint16_t *sumValues, uint16_t *arrayValues, uint8_t *wi
 }
 
 bool checkStability(uint16_t* values, int currentIndex) {
-    
-    float sum = 0.0;
-    float mean = 0.0;
+  float sum = 0.0;
+  float mean = 0.0;
 
-    // Calculate mean
-    for (int i = currentIndex - WINDOW_STABILIZE + 1; i <= currentIndex; i++) {
-        sum += values[i];
-    }
-    mean = sum / WINDOW_STABILIZE;
+  // Calculate mean
+  for (int i = currentIndex - WINDOW_STABILIZE + 1; i <= currentIndex; i++)
+    sum += values[i];
+  mean = sum / WINDOW_STABILIZE;
 
-    // Calculate standard deviation
-    sum = 0.0;
-    for (int i = currentIndex - WINDOW_STABILIZE + 1; i <= currentIndex; i++)
-        sum += pow(values[i] - mean, 2);
-    
-    stdDev = sqrt(sum / WINDOW_STABILIZE);
+  // Calculate standard deviation
+  sum = 0.0;
+  for (int i = currentIndex - WINDOW_STABILIZE + 1; i <= currentIndex; i++)
+    sum += pow(values[i] - mean, 2);
+  stdDev = sqrt(sum / WINDOW_STABILIZE);
 
-    // Check stability
-    if (stdDev < STABILITY_THRESHOLD) {
-        stableReadingsCount++;
-        unstableReadingsCount = 0;
-    } else {
-        unstableReadingsCount++;
-        stableReadingsCount = 0;
-    }
+  // Check stability
+  if (stdDev < STABILITY_THRESHOLD) {
+    stableReadingsCount++;
+    unstableReadingsCount = 0;
+  } else {
+    unstableReadingsCount++;
+    stableReadingsCount = 0;
+  }
 
-    Serial.print("> Desvio Padrão: ");Serial.println(stdDev);
-
-    if (stableReadingsCount >= STABLE_READINGS_THRESHOLD)
-      return true;
-
-    else if (unstableReadingsCount >= UNSTABLE_READINGS_THRESHOLD)
-      return false;
+  if (stableReadingsCount >= STABLE_READINGS_THRESHOLD)
+    return true;
+  else if (unstableReadingsCount >= UNSTABLE_READINGS_THRESHOLD)
+    return false;
 
   return false;
 }
 
 void find_valleys_and_peaks(bool calBPM, uint16_t* signalAC, uint16_t* signalDC, uint16_t* valleys, uint16_t* peaks) {
+  int last_valley_index = -MIN_DISTANCE_BETWEEN_VALLEYS;
+  int last_peak_index = -MIN_DISTANCE_BETWEEN_PEAKS;
 
-    int last_valley_index = -MIN_DISTANCE_BETWEEN_VALLEYS;
-    int last_peak_index = -MIN_DISTANCE_BETWEEN_PEAKS;
-
-    for (uint16_t i = 200 + WINDOW_SIZE; i < SIGNAL_SIZE - WINDOW_SIZE - 200; i++) {
-        
-        bool is_valley = true;
-        for (int j = i - WINDOW_SIZE; j <= i + WINDOW_SIZE; j++) {
-            if (signalAC[j] < signalAC[i]) {
-                is_valley = false;
-                break;
-            }
-        }
-
-        if (is_valley && i - last_valley_index >= MIN_DISTANCE_BETWEEN_VALLEYS) {
-            *valleys++ = signalAC[i];
-            last_valley_index = i;
-
-            uint16_t peak = signalAC[i];
-            uint16_t peakIndex = i;
-
-            for (int j = i + 1; j < i + PEAK_WINDOW_SIZE && j < SIGNAL_SIZE; j++) {
-                if (signalAC[j] > peak && j - last_peak_index >= MIN_DISTANCE_BETWEEN_PEAKS) {
-                    peak = signalAC[j];
-                    peakIndex = j;
-                }
-            }
-
-            if (peakIndex != i) {
-                *peaks++ = peak;
-                last_peak_index = peakIndex;
-            }
-        }
+  for (uint16_t i = 200 + WINDOW_SIZE; i < SIGNAL_SIZE - WINDOW_SIZE - 200; i++) {
+    bool is_valley = true;
+    for (int j = i - WINDOW_SIZE; j <= i + WINDOW_SIZE; j++) {
+      if (signalAC[j] < signalAC[i]) {
+        is_valley = false;
+        break;
+      }
     }
 
-    if(calBPM){
-      uint16_t bpm = 5100/(0.68*((last_peak_index - last_valley_index)*1.4));
-      uint16_t SPO2 = random(95, 101);
+    if (is_valley && i - last_valley_index >= MIN_DISTANCE_BETWEEN_VALLEYS) {
+      *valleys++ = signalAC[i];
+      last_valley_index = i;
 
-      Serial.print("  bpm: ");Serial.println(bpm);
+      uint16_t peak = signalAC[i];
+      uint16_t peakIndex = i;
 
-      pCharacteristic->setValue(bpm);
-      pCharacteristic->notify();
-    
-      pNewCharacteristic->setValue(SPO2);
-      pNewCharacteristic->notify();
+      for (int j = i + 1; j < i + PEAK_WINDOW_SIZE && j < SIGNAL_SIZE; j++) {
+        if (signalAC[j] > peak && j - last_peak_index >= MIN_DISTANCE_BETWEEN_PEAKS) {
+          peak = signalAC[j];
+          peakIndex = j;
+        }
+      }
 
-      vTaskDelay(1/portTICK_PERIOD_MS);
+      if (peakIndex != i) {
+        *peaks++ = peak;
+        last_peak_index = peakIndex;
+      }
     }
+  }
+
+  if (calBPM) {
+    uint16_t bpm = 5100 / (0.68 * ((last_peak_index - last_valley_index) * 1.4));
+    uint16_t SPO2 = random(95, 101);
+
+    Serial.print("  bpm: "); Serial.println(bpm);
+
+    // ble.getCharacteristic()->setValue(bpm);
+    // ble.getCharacteristic()->notify();
+
+    // ble.getCharacteristic()->setValue(SPO2);
+    // ble.getCharacteristic()->notify();
+
+    vTaskDelay(1 / portTICK_PERIOD_MS);
+  }
 }
 
+void CalculateTheBPM() {
+  // Função vazia, pode ser implementada conforme necessário
+}
 
-void CalculateTheBPM(){
+float calculateRatio(uint16_t* acRed, uint16_t* dcRed, uint16_t* acIR, uint16_t* dcIR, uint16_t start, uint16_t end) {
+  float sumAcRed = 0, sumDcRed = 0, sumAcIR = 0, sumDcIR = 0;
+  uint16_t count = end - start;
+
+  for (uint16_t i = start; i < end; i++) {
+    sumAcRed += acRed[i];
+    sumDcRed += dcRed[i];
+    sumAcIR += acIR[i];
+    sumDcIR += dcIR[i];
+  }
+
+  float meanAcRed = sumAcRed / count;
+  float meanDcRed = sumDcRed / count;
+  float meanAcIR = sumAcIR / count;
+  float meanDcIR = sumDcIR / count;
+
+  Serial.print("meanAcRed: "); Serial.println(meanAcRed);
+  Serial.print("meanDcRed: "); Serial.println(meanDcRed);
+  Serial.print("meanAcIR: "); Serial.println(meanAcIR);
+  Serial.print("meanDcIR: "); Serial.println(meanDcIR);
+
+  if (meanDcRed == 0 || meanDcIR == 0) {
+    Serial.println("Error: DC mean value is zero, cannot calculate ratio.");
+    return 1.0; // Return a default value to avoid division by zero
+  }
+
+  float ratio = (meanAcRed / meanDcRed) / (meanAcIR / meanDcIR);
+  return ratio;
 }
